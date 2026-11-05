@@ -15,8 +15,8 @@ import subprocess
 import sys
 
 import prepare_ffmpeg_source as source
-from build_nyarch_apps import guest_environment
-from build_release_rootfs import build_resolver
+from rootfs.arch import guest_environment
+from rootfs.common import build_resolver
 
 ROOT = Path(__file__).resolve().parents[1]
 

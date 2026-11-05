@@ -96,7 +96,7 @@ def inspect(args):
     require(re.fullmatch('[0-9][A-Za-z0-9.+]*', args.version), 'Invalid package version')
     profile = read_json(BSP / 'profiles.json')['profiles'][args.target]
     suite = args.suite or profile['default_suite']
-    require(suite and re.fullmatch('[A-Za-z0-9_.-]+', suite), 'Specify an explicit Deepin/target suite')
+    require(suite and re.fullmatch('[A-Za-z0-9_.-]+', suite), 'Specify a target suite')
     source, rows = payload(args.feature)
     ledger = read_json(BSP / 'layers.json')
     layers = ledger['required_layers']
@@ -138,59 +138,24 @@ def stage(args):
     return output, tree, report, rows
 
 
-def preinst(paths):
-    quoted = ' '.join(shlex.quote('/' + name) for name in paths)
-    return ('#!/bin/sh\nset -eu\n'
-            '# Refuse cross-package ownership and unowned existing files; no force-overwrite.\n'
-            f'for path in {quoted}; do\n'
-            '  if [ -e "$path" ] || [ -L "$path" ]; then\n'
-            '    owned=$(dpkg-query --search "$path" 2>/dev/null || true)\n'
-            f'    case "$owned" in "{NAME}: $path"|"{NAME}:all: $path") ;;\n'
-            '      *) printf "%s\\n" "BSP file conflict: $path ($owned)" >&2; exit 1 ;;\n'
-            '    esac\n'
-            '  fi\ndone\n')
-
-
 def package(args, output, tree, report, rows):
-    require(args.format in ('deb', 'tar'), 'Select --format deb or tar')
-    if args.format == 'deb':
-        require(args.target != 'arch', 'Arch requires a native recipe/package, not a Debian deb')
-        require(shutil.which('dpkg-deb'), 'Missing dpkg-deb; no simulated .deb is generated')
-        control = tree / 'DEBIAN'
-        control.mkdir()
-        control.chmod(0o755)
-        (control / 'control').write_text(f'Package: {NAME}\nVersion: {args.version}\nArchitecture: all\n'
-                                       f'Maintainer: Project SunUEFI\nSection: misc\nPriority: optional\n'
-                                       'Depends: ' + ', '.join(report['depends']) + '\n'
-                                       'Description: Piano device configuration (target profile candidate)\n'
-                                       ' Configuration only; native runtime, Mesa, firmware and modules are separate.\n')
-        (control / 'conffiles').write_text(''.join('/' + row['path'] + '\n' for row, _ in rows if row['path'].startswith('etc/')))
-        (control / 'preinst').write_text(preinst(report['payload_files']))
-        (control / 'preinst').chmod(0o755)
-        subprocess.run(['/bin/sh', '-n', control / 'preinst'], check=True)
-        artifact = output / f'{NAME}_{args.version}_all.deb'
-        subprocess.run(['dpkg-deb', '--root-owner-group', '--build', tree, artifact], check=True,
-                       env={**os.environ, 'SOURCE_DATE_EPOCH': '0'})
-        shutil.rmtree(control)
-        report['package_ready'] = True
-        report['files'][artifact.name] = {'bytes': artifact.stat().st_size, 'sha256': sha(artifact.read_bytes()), 'format': 'deb'}
-    else:
-        require(shutil.which('tar'), 'Missing tar')
-        artifact = output / 'payload.tar'
-        subprocess.run(['tar', '--sort=name', '--numeric-owner', '--owner=0', '--group=0', '--mtime=@0',
-                        '--format=pax', '--pax-option=delete=atime,delete=ctime', '-C', tree, '-cf', artifact, '.'], check=True)
-        report['files'][artifact.name] = {'bytes': artifact.stat().st_size, 'sha256': sha(artifact.read_bytes()), 'format': 'tar'}
-        if args.archrecipe:
-            require(args.target == 'arch', '--archrecipe requires --target arch')
-            recipe = output / 'PKGBUILD'
-            depends = ' '.join(shlex.quote(dep) for dep in report['depends'])
-            recipe.write_text(f'pkgname={NAME}\npkgver={args.version}\npkgrel=1\narch=(any)\nlicense=(MIT)\n'
-                              f'pkgdesc="Piano device configuration; native layers separate"\ndepends=({depends})\n'
-                              'source=(payload.tar)\nnoextract=(payload.tar)\n'
-                              f"sha256sums=('{report['files']['payload.tar']['sha256']}')\n"
-                              'package() {\n  bsdtar --no-same-owner -xf "$srcdir/payload.tar" -C "$pkgdir"\n}\n')
-            subprocess.run(['/bin/bash', '-n', recipe], check=True)
-            report['files'][recipe.name] = {'bytes': recipe.stat().st_size, 'sha256': sha(recipe.read_bytes()), 'format': 'arch-recipe'}
+    require(args.format == 'tar', 'Select --format tar')
+    require(shutil.which('tar'), 'Missing tar')
+    artifact = output / 'payload.tar'
+    subprocess.run(['tar', '--sort=name', '--numeric-owner', '--owner=0', '--group=0', '--mtime=@0',
+                    '--format=pax', '--pax-option=delete=atime,delete=ctime', '-C', tree, '-cf', artifact, '.'], check=True)
+    report['files'][artifact.name] = {'bytes': artifact.stat().st_size, 'sha256': sha(artifact.read_bytes()), 'format': 'tar'}
+    if args.archrecipe:
+        require(args.target == 'arch', '--archrecipe requires --target arch')
+        recipe = output / 'PKGBUILD'
+        depends = ' '.join(shlex.quote(dep) for dep in report['depends'])
+        recipe.write_text(f'pkgname={NAME}\npkgver={args.version}\npkgrel=1\narch=(any)\nlicense=(MIT)\n'
+                          f'pkgdesc="Piano device configuration; native layers separate"\ndepends=({depends})\n'
+                          'source=(payload.tar)\nnoextract=(payload.tar)\n'
+                          f"sha256sums=('{report['files']['payload.tar']['sha256']}')\n"
+                          'package() {\n  bsdtar --no-same-owner -xf "$srcdir/payload.tar" -C "$pkgdir"\n}\n')
+        subprocess.run(['/bin/bash', '-n', recipe], check=True)
+        report['files'][recipe.name] = {'bytes': recipe.stat().st_size, 'sha256': sha(recipe.read_bytes()), 'format': 'arch-recipe'}
 
 
 def build(args):
@@ -198,7 +163,7 @@ def build(args):
         return inspect(args)[0]
     if args.command == 'package':
         require(args.format, 'Select --format')
-        require(shutil.which('dpkg-deb' if args.format == 'deb' else 'tar'), 'Missing package backend: ' + str(args.format))
+        require(shutil.which('tar'), 'Missing package backend: ' + str(args.format))
     output, tree, report, rows = stage(args)
     if args.command == 'package':
         package(args, output, tree, report, rows)
@@ -213,11 +178,11 @@ def build(args):
 def parser():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('command', choices=('inspect', 'stage', 'package'))
-    ap.add_argument('--target', choices=('debian', 'ubuntu', 'deepin', 'arch'), default='debian')
+    ap.add_argument('--target', choices=('arch',), default='arch')
     ap.add_argument('--suite')
     ap.add_argument('--arch', choices=('aarch64',), default='aarch64')
     ap.add_argument('--feature', choices=('camera',), action='append', default=[])
-    ap.add_argument('--format', choices=('deb', 'tar'))
+    ap.add_argument('--format', choices=('tar',))
     ap.add_argument('--archrecipe', action='store_true')
     ap.add_argument('--against', type=Path, help='Readonly target-root conflict/ownership check')
     ap.add_argument('--output', type=Path)

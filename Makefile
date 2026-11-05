@@ -19,7 +19,7 @@ kernel-source:
 
 .PHONY: bsp rootfs
 bsp:
-	./build.sh bsp inspect --target debian
+	./build.sh bsp inspect --target arch
 
 rootfs:
-	./build.sh rootfs --distro debian --desktop gnome --plan
+	./build.sh rootfs --distro arch --desktop niri --plan

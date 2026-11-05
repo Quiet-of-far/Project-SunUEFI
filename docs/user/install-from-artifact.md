@@ -6,15 +6,17 @@
 
 平板已解锁 Bootloader，并安装了 KernelSU 或 SukiSU，重要数据已备份。官方 Magisk 需要 MMRL 等支持 WebUI 的管理器。
 
-从 [Build products](https://github.com/slwyts/Project-SunUEFI/actions/workflows/build-products.yml) 同一次完整构建里下载三个包：
+从 [Build products](https://github.com/Quiet-of-far/Project-SunUEFI/actions/workflows/build-products.yml) 同一次完整构建里下载三个包：
 
 | 下载包 | 解压后使用的文件 | 用途 |
 | --- | --- | --- |
 | `SunUEFI-Module` | `SunUEFI-Piano-版本.zip` | 引导助手模块 |
 | `SunUEFI-ESP` | `esp.sparse.img` | 启动镜像（ESP） |
-| `SunUEFI-Root-发行版` | `root-发行版.sparse.img` | 系统镜像（root） |
+| `SunUEFI-Root-arch-niri` | `root-arch-niri.sparse.img` | 系统镜像（root） |
 
-发行版可选 `debian-gnome`、`debian-kde`、`nyarch-gnome` 或 `steamos`。ESP 和模块各只有一份，四个系统共用。手动选择 `uefi` 或 `linux` 的开发构建不含完整系统。`SunUEFI-UEFI-Fastboot` 只用于[临时启动](temporary-boot.md)，`logs` 用于排查构建问题，安装时都不需要。
+本分支提供 Arch Linux ARM + niri。ESP、模块和 root 必须来自同一次完整构建。
+手动选择 `uefi` 或 `linux` 的开发构建不含完整系统。`SunUEFI-UEFI-Fastboot`
+用于[临时启动](temporary-boot.md)，`logs` 用于排查构建问题。
 
 把模块 ZIP 和两个镜像文件保存在平板上。模块 ZIP 不要解压，镜像文件放在任意位置，之后在助手里用文件选择器选取。刷写稀疏镜像需要 0.5.2 或更新的助手。
 

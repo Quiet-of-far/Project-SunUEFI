@@ -29,8 +29,8 @@ class BspPackageTests(unittest.TestCase):
 
     def test_default_config_has_no_desktop_identity_or_native_payload(self):
         report = bsp.build(self.args())
-        self.assertEqual(report['target'], {'distro': 'debian', 'suite': 'trixie', 'arch': 'aarch64'})
-        self.assertEqual(report['package_architecture'], 'all')
+        self.assertEqual(report['target'], {'distro': 'arch', 'suite': 'rolling', 'arch': 'aarch64'})
+        self.assertEqual(report['package_architecture'], 'any')
         self.assertFalse(report['auto_enable_services'])
         self.assertFalse(report['device_tested'])
         self.assertEqual(set(report['required_layers']), {'runtime', 'modules', 'mesa', 'firmware'})
@@ -44,14 +44,8 @@ class BspPackageTests(unittest.TestCase):
         self.assertEqual([line for line in data.splitlines()if line and not line.startswith('#')],['uhid','hid_xiaomi'])
         camera = bsp.build(self.args('inspect', '--feature', 'camera'))
         self.assertIn('etc/wireplumber/wireplumber.conf.d/50-piano-camera.conf', camera['payload_files'])
-        self.assertIn('wireplumber (>= 0.5)', camera['depends'])
+        self.assertIn('wireplumber>=0.5', camera['depends'])
 
-    def test_deepin_requires_explicit_suite(self):
-        with self.assertRaisesRegex(ValueError, 'explicit'):
-            bsp.build(self.args('inspect', '--target', 'deepin'))
-        report = bsp.build(self.args('inspect', '--target', 'deepin', '--suite', 'user-selected-suite'))
-        self.assertEqual(report['target']['suite'], 'user-selected-suite')
-        self.assertFalse(report['dependency_resolution_tested'])
 
     def test_payload_tamper_refused_before_stage(self):
         copied = self.base / 'bsp'
@@ -133,31 +127,13 @@ class BspPackageTests(unittest.TestCase):
             self.assertIn(b"VA_DEC0 Volume' 124", hifi)
         self.assertEqual(report['files']['payload.tar']['sha256'], hashlib.sha256((out / 'payload.tar').read_bytes()).hexdigest())
 
-    def test_missing_deb_backend_does_not_fake_package(self):
+    def test_missing_tar_backend_does_not_fake_package(self):
         out = self.base / 'bundle'
         with patch.object(bsp.shutil, 'which', return_value=None):
             with self.assertRaisesRegex(ValueError, 'Missing package backend'):
-                bsp.build(self.args('package', '--format', 'deb', '--output', str(out)))
+                bsp.build(self.args('package', '--format', 'tar', '--output', str(out)))
         self.assertFalse(out.exists())
 
-    @unittest.skipUnless(shutil.which('dpkg-deb'), 'dpkg-deb unavailable; no fake deb test')
-    def test_real_deb_control_and_payload(self):
-        out = self.base / 'deb'
-        report = bsp.build(self.args('package', '--format', 'deb', '--output', str(out)))
-        artifact = out / next(iter(report['files']))
-        field = subprocess.check_output(['dpkg-deb', '--field', artifact, 'Architecture'], text=True).strip()
-        self.assertEqual(field, 'all')
-        data = subprocess.check_output(['dpkg-deb', '--fsys-tarfile', artifact])
-        with tarfile.open(fileobj=io.BytesIO(data)) as archive:
-            for member in archive:
-                self.assertEqual((member.uid, member.gid), (0, 0))
-            self.assertIn('./etc/modprobe.d/piano.conf', archive.getnames())
-        control = self.base / 'control'
-        subprocess.run(['dpkg-deb', '--control', artifact, control], check=True)
-        guard = (control / 'preinst').read_text()
-        self.assertIn('dpkg-query', guard)
-        self.assertNotIn('systemctl', guard)
-        self.assertNotIn('Replaces:', (control / 'control').read_text())
 
 
 if __name__ == '__main__':

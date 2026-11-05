@@ -1,4 +1,6 @@
 import gzip
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -94,6 +96,23 @@ class ReleasePackageTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, 'identity/SSH'):
                         pr.scan_root(self.root, '6.6-fixture')
                 p.unlink()
+
+    def test_manifest_pinned_piano_authorized_key_can_be_included_explicitly(self):
+        home = self.root / 'home/piano/.ssh'
+        home.mkdir(parents=True)
+        key_blob = struct.pack('>I', len(b'ssh-ed25519')) + b'ssh-ed25519' + struct.pack('>I', 32) + bytes(range(32))
+        key = home / 'authorized_keys'
+        key.write_bytes(b'ssh-ed25519 ' + base64.b64encode(key_blob) + b'\n')
+        home.chmod(0o700)
+        key.chmod(0o600)
+        fingerprint = 'SHA256:' + base64.b64encode(hashlib.sha256(key_blob).digest()).decode().rstrip('=')
+        meta = {'debug_access': {'ssh_public_key': {'fingerprint': fingerprint}}}
+        self.assertIn('home/piano/.ssh/authorized_keys', pr.scan_root(
+            self.root, '6.6-fixture', allow_authorized_key=True))
+        pr.validate_authorized_key(self.root, meta)
+        meta['debug_access']['ssh_public_key']['fingerprint'] = 'SHA256:' + 'A' * 43
+        with self.assertRaisesRegex(ValueError, 'fingerprint differs'):
+            pr.validate_authorized_key(self.root, meta)
 
     def test_guest_absolute_links_and_empty_machine_id_alias(self):
         (self.root / 'var/lib/dbus').mkdir(parents=True)

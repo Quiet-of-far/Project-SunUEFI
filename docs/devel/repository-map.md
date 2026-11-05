@@ -14,7 +14,7 @@
 | `uefi/platforms/pianoProductPkg/` | 脚本生成 | 产品构建的临时平台，不提交，不要手工修改里面的文件 |
 | `config/` | 手写配置 | 内核版本、固件清单、发行版依赖等配置，直接修改 |
 | `linux/configs/`、`linux/dts/` | 手写配置 | 内核配置片段与设备树 overlay，直接修改 |
-| `linux/bsp/`、`linux/rootfs/`、`linux/desktops/` | 手写配方 | 多发行版支持、根系统装配与桌面环境配置，直接修改 |
+| `linux/bsp/`、`linux/rootfs/`、`linux/desktops/` | 手写配方 | Arch 硬件配方、根系统装配与 niri 配置，直接修改 |
 | `tools/` | 手写脚本 | 构建、打包、检查脚本，直接修改 |
 | `tests/` | 手写测试 | 主机端 Python 和原生 C 测试，直接修改 |
 | `upstream/` | 子模块 | 固定提交的上游源码，不要直接在里面修改，改动通过 `patches/` 表达 |

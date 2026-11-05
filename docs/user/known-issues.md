@@ -47,5 +47,3 @@ fastboot -s SunUEFI-piano getvar product
 * 新装系统需要自己通过 NetworkManager 保存 Wi-Fi。
 * Recovery 里的独立 SunUEFI 镜像已放弃，见[故障恢复](recovery.md#原厂-recovery)。
 * 测试设备是 CSOT 面板、16 GB 内存的平板，其他面板版本和内存容量没有测试过。
-* `debian-kde` 由 CI 构建，实机上的桌面和硬件功能没有像 GNOME 那样逐项验证。
-* SteamOS 是实验版，游戏兼容性因游戏而异，见 [SteamOS](steamos.md)。

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Install the shared Piano hardware sources into a completed Arch desktop.
 
-The native Mesa, sensor and Nyarch application packages must already be
-installed through pacman. This assembles firmware, kernel modules and the same
-static runtime used by Debian; it never reads the host's live device state.
+The native Mesa and sensor packages must already be installed through pacman.
+This assembles firmware, kernel modules and the shared static runtime; it never reads the host's live device state.
 """
 import argparse
 import json
@@ -14,12 +13,11 @@ import subprocess
 import sys
 
 import build_piano_runtime_helpers as runtime
-import build_release_rootfs as release
-from build_nyarch_apps import guest_environment
+from rootfs import common as release
+from rootfs.arch import guest_environment
 import stage_piano_full_userspace as userspace
 import stage_piano_kernel_modules as modules
 import stage_piano_ram_hardware as hardware
-import stage_nyarch_desktop as nyarch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,17 +39,13 @@ def stage(args):
     if (helper_kernel['commit'], helper_kernel['release']) != (
             kernel['source_commit'], kernel['kernel_release']):
         raise ValueError('Rebuild the runtime helpers for the selected kernel')
-    steamos = getattr(args, 'desktop', 'nyarch') == 'steamos'
-    userspace.stage(root, ROOT / cfg['debian']['source'],
-                    desktop='kde' if steamos else 'gnome')
+    userspace.stage(root, ROOT / cfg['debian']['source'], desktop='niri')
     # These are generated files in the build root; refresh them on --resume.
     adapters = output / 'piano-adapters'
     if adapters.exists():
         shutil.rmtree(adapters)
     hardware.build(adapters, ROOT / cfg['debian']['source'], root)
-    old_modules = ([p.name for p in (root / 'usr/lib/modules').iterdir()
-                    if p.is_dir() and p.name != kernel['kernel_release']]
-                   if steamos and (root / 'usr/lib/modules').is_dir() else [])
+    old_modules = []
     current_modules = modules.safe_target(
         root, Path('usr/lib/modules') / kernel['kernel_release'])
     if current_modules.exists():
@@ -89,45 +83,52 @@ def stage(args):
     put(root, 'usr/lib/systemd/system/sshd.service.d/10-piano.conf',
         '[Unit]\nRequires=piano-hostkeys.service\nAfter=piano-hostkeys.service\n')
     (root / 'usr/lib/systemd/system/ssh.service.d/piano.conf').unlink(missing_ok=True)
+    put(root, 'etc/ssh/sshd_config.d/00-piano.conf',
+        'PubkeyAuthentication yes\nPasswordAuthentication no\n'
+        'KbdInteractiveAuthentication no\nPermitRootLogin no\n')
     # Standard libinput hardware defaults; no desktop-specific name spoofing.
     release.apply_policy(root, output, cfg)
-    if not steamos:
-        put(root, 'usr/share/gnome-settings-daemon/ambient-profiles/piano.ini',
-            (ROOT / 'linux/desktops/gnome/ambient-policy/piano.ini').read_text())
     put(root, 'etc/piano/linux-debug.conf', 'usb=acm-ncm\nshell=1\nrecovery_seconds=0\n')
     put(root, 'etc/chromium-flags.conf',
         (ROOT / 'linux/bsp/arch/chromium-flags.conf').read_text())
+    from assemble_rootfs import configure_desktop
+    configure_desktop(root, {
+        'desktop': 'niri', 'distro': 'arch', 'scale_percent': 200,
+        'desktop_profile': {'display_manager': {'arch': 'greetd'}},
+    }, None, [])
+    put(root, 'home/piano/.config/niri/config.kdl',
+        (root / 'etc/skel/.config/niri/config.kdl').read_text())
+    for name in ('config.jsonc', 'style.css'):
+        put(root, 'home/piano/.config/waybar/' + name,
+            (root / 'etc/skel/.config/waybar' / name).read_text())
     with release.build_resolver(root), guest_environment(root) as guest:
         guest(['pacman', '-S', '--needed', '--noconfirm', 'erofs-utils', 'device-mapper', 'rsync'])
+        # Writing LANG alone does not generate Arch's glibc locale archive.
+        put(root, 'etc/locale.gen', 'en_US.UTF-8 UTF-8\nzh_CN.UTF-8 UTF-8\n')
+        guest(['locale-gen'])
         # The upstream demo account occupies UID 1000 in bootstrap tarballs.
         if subprocess.run(['chroot', root, 'id', 'alarm'], capture_output=True).returncode == 0:
             guest(['userdel', '-r', 'alarm'])
         if subprocess.check_output(['chroot', root, 'id', '-u', 'piano'], text=True).strip() != '1000':
             guest(['usermod', '-u', '1000', 'piano'])
         guest(['chown', '-R', 'piano:piano', '/home/piano'])
-        guest(['usermod', '-aG', 'audio,video,input,render', 'piano'])
+        guest(['usermod', '-aG', 'wheel,audio,video,input,render', 'piano'])
         guest(['chpasswd'], input='piano:' + cfg['login']['password'] + '\n', text=True)
         guest(['systemctl', 'unmask', 'sleep.target', 'suspend.target'])
         guest(['systemctl', 'mask', 'hibernate.target',
                'hybrid-sleep.target', 'suspend-then-hibernate.target',
                'adsprpcd.service', 'adsprpcd_audiopd.service'])
-        guest(['systemctl', 'enable', 'sddm' if steamos else 'gdm', 'NetworkManager', 'sshd', 'bluetooth',
+        guest(['systemctl', 'enable', 'greetd', 'NetworkManager', 'sshd', 'bluetooth',
                'piano-touch', 'piano-radio', 'piano-adsp', 'piano-audio',
                'piano-video', 'piano-camera', 'piano-camerad', 'piano-keyboard',
                'piano-cpufreq', 'piano-hostkeys', 'adsprpcd-sensorspd'])
         guest(['systemctl', 'set-default', 'graphical.target'])
         guest(['depmod', '-a', kernel['kernel_release']])
-    if steamos:
-        from stage_steamos_desktop import configure
-        desktop = configure(root)
-    else:
-        from prepare_nyarch_material import prepare, UUID
-        extension_bundle = output / 'nyarch-shell-extensions'
-        if extension_bundle.exists():
-            shutil.rmtree(extension_bundle)
-        shutil.copytree(args.extensions, extension_bundle)
-        prepare(args.desktop_source.resolve(), root, extension_bundle / UUID)
-        desktop = nyarch.stage(root, args.desktop_source, extension_bundle)
+        guest(['niri', 'validate', '--config', '/home/piano/.config/niri/config.kdl'])
+    desktop = {'session': 'niri', 'display_manager': 'greetd',
+               'screen_scaling_configured': False,
+               'onscreen_keyboard_configured': True,
+               'automatic_rotation_configured': False}
     clock = release.clock_epoch(root)
     release.native_boot_request(root, output)
     # Shared static bootstrap is built from a signed Debian busybox input,
@@ -157,9 +158,9 @@ def stage(args):
     packages = subprocess.check_output(['chroot', root, 'pacman', '-Q'], text=True)
     (output / 'packages.tsv').write_text(packages)
     record = {'status': 'HOST_BUILT_ROOT_NOT_BOOT_VERIFIED',
-              'distro': 'steamos' if steamos else 'nyarch',
-              'base': 'Valve SteamOS ARM64' if steamos else 'Arch Linux ARM rolling',
-              'desktop': 'kde' if steamos else 'gnome', 'kernel_release': kernel['kernel_release'],
+              'distro': 'arch',
+              'base': 'Arch Linux ARM rolling',
+              'desktop': 'niri', 'kernel_release': kernel['kernel_release'],
               'kernel_commit': kernel['source_commit'], 'kernel_manifest_sha256': kernel_hash,
               'root_policy': 'LABEL=PIANOROOT', 'login': cfg['login'],
               'desktop_configuration': desktop, 'initramfs': boot, 'clock_epoch': clock,
@@ -173,13 +174,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('rootfs', 'kernel', 'runtime', 'sensor-source', 'bootstrap-sysroot'):
         parser.add_argument('--' + name, type=Path, required=True)
-    parser.add_argument('--desktop', choices=('nyarch', 'steamos'), default='nyarch')
-    parser.add_argument('--desktop-source', type=Path)
-    parser.add_argument('--extensions', type=Path, default=ROOT / 'build/nyarch-extensions')
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
-    if args.desktop == 'nyarch' and args.desktop_source is None:
-        parser.error('--desktop-source is required for Nyarch')
     if not args.worker:
         raise SystemExit(subprocess.run(['unshare', '--mount', '--propagation', 'private',
                                         sys.executable, __file__, *sys.argv[1:], '--worker']).returncode)

@@ -10,8 +10,8 @@ import subprocess
 import sys
 import tempfile
 
-from build_nyarch_apps import ROOT, guest_environment, run
-from build_release_rootfs import build_resolver
+from rootfs.arch import ROOT, guest_environment, run
+from rootfs.common import build_resolver
 
 
 def install_cached(root, output):
@@ -57,7 +57,7 @@ def build(root, recipe, output, resume=False):
             ['bash', '-c', 'source "$1/PKGBUILD"; printf "%s\\n" "${makedepends[@]}" "${depends[@]}"',
              'dependencies', folder], capture_output=True, text=True).stdout.splitlines()
         dependencies = list(dict.fromkeys(['base-devel', *[p for p in dependencies if p]]))
-        # A locally built dependency (for example libssc on SteamOS) need not
+        # A locally built dependency (for example the local libssc package) need not
         # exist in the base's repositories. Resolve installed versions first.
         missing = subprocess.run(['chroot', root, 'pacman', '-T', *dependencies],
                                  capture_output=True, text=True)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build an offline Piano bundle with real FAT/ext4 tools; never access a device."""
 import argparse
+import base64
 from collections import Counter
 import gzip
 import hashlib
@@ -258,7 +259,7 @@ def component(path, metadata, explicit, kind):
     return expected
 
 
-def scan_root(root, release):
+def scan_root(root, release, allow_authorized_key=False):
     """Inspect names/stat only for credentials; never open their contents."""
     require(root.is_dir() and not root.is_symlink(), 'Expected a clean rootfs directory')
     rows, links = {}, Counter()
@@ -269,7 +270,8 @@ def scan_root(root, release):
         require(stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode), 'Special rootfs file: ' + name)
         if name.split('/')[0] in ('dev', 'proc', 'sys', 'run'):
             require(name in ('dev', 'proc', 'sys', 'run') and stat.S_ISDIR(info.st_mode), 'Runtime tree is not empty: ' + name)
-        secret = '.ssh' in path.relative_to(root).parts or name.startswith('etc/ssh/ssh_host_')
+        authorized_key = allow_authorized_key and name == 'home/piano/.ssh/authorized_keys'
+        secret = ('.ssh' in path.relative_to(root).parts and not authorized_key) or name.startswith('etc/ssh/ssh_host_')
         machine = name in ('etc/machine-id', 'var/lib/dbus/machine-id')
         identity = guest_resolve(root, '/' + name).lstat() if machine and stat.S_ISLNK(info.st_mode) else info
         require(not (secret or machine) or (stat.S_ISREG(identity.st_mode) and identity.st_size == 0) or stat.S_ISDIR(identity.st_mode),
@@ -301,6 +303,36 @@ def scan_root(root, release):
         modules = guest_resolve(root, '/usr/lib/modules')
     require(modules.is_dir() and sorted(p.name for p in modules.iterdir()) == [release], 'Rootfs kernel modules/release mismatch')
     return rows
+
+
+def validate_authorized_key(root, root_meta):
+    """Allow only the manifest-pinned public key requested for this device."""
+    access = root_meta.get('debug_access', {})
+    expected = access.get('ssh_public_key', {}).get('fingerprint')
+    require(isinstance(expected, str) and re.fullmatch(r'SHA256:[A-Za-z0-9+/]{43}', expected),
+            'Authorized-key packaging requires a debug_access fingerprint in the rootfs manifest')
+    home = root / 'home/piano'
+    directory = home / '.ssh'
+    key = directory / 'authorized_keys'
+    require(directory.is_dir() and not directory.is_symlink() and stat.S_IMODE(directory.stat().st_mode) == 0o700,
+            'piano .ssh directory must have mode 0700')
+    require(key.is_file() and not key.is_symlink() and stat.S_IMODE(key.stat().st_mode) == 0o600,
+            'piano authorized_keys must be a regular mode-0600 file')
+    lines = key.read_bytes().splitlines()
+    require(len(lines) == 1, 'Only one authorized public key may be included')
+    fields = lines[0].split()
+    require(len(fields) == 2 and fields[0] in (b'ssh-ed25519', b'ssh-rsa',
+            b'ecdsa-sha2-nistp256', b'ecdsa-sha2-nistp384', b'ecdsa-sha2-nistp521'),
+            'authorized_keys must contain one plain OpenSSH public key')
+    try:
+        blob = base64.b64decode(fields[1], validate=True)
+    except ValueError as error:
+        raise ValueError('Invalid authorized public-key encoding') from error
+    require(blob.startswith(struct.pack('>I', len(fields[0])) + fields[0]),
+            'Authorized key type differs from its encoded key')
+    actual = 'SHA256:' + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip('=')
+    require(actual == expected, 'authorized_keys fingerprint differs from the rootfs manifest')
+    return key
 
 
 def pinned_mkbootimg():
@@ -494,7 +526,9 @@ def package(args):
     if 'etc/piano/kernel-release' in embedded:
         require(embedded['etc/piano/kernel-release'].decode().strip() == release, 'Initramfs embedded release mismatch')
     require(all(n.split('/')[2] == release for n in embedded if n.startswith('lib/modules/') and len(n.split('/')) > 2), 'Initramfs module release mismatch')
-    rows = scan_root(root, release)
+    if args.include_piano_authorized_key:
+        validate_authorized_key(root, root_meta)
+    rows = scan_root(root, release, allow_authorized_key=args.include_piano_authorized_key)
     build_archive = not args.root_size_mib or args.root_archive
     tools = ['mkfs.vfat', 'mmd', 'mcopy']
     if build_archive:
@@ -548,7 +582,7 @@ def package(args):
     if args.root_size_mib:
         ext4(root, output / 'root.ext4.img', args.root_size_mib, args.root_selector.split('=', 1)[1], args.epoch, rows, work)
     require({n: (s.st_mode, s.st_uid, s.st_gid, s.st_size, s.st_mtime_ns, s.st_ctime_ns) for n, s in rows.items()} ==
-            {n: (s.st_mode, s.st_uid, s.st_gid, s.st_size, s.st_mtime_ns, s.st_ctime_ns) for n, s in scan_root(root, release).items()}, 'Rootfs changed while packaging')
+            {n: (s.st_mode, s.st_uid, s.st_gid, s.st_size, s.st_mtime_ns, s.st_ctime_ns) for n, s in scan_root(root, release, allow_authorized_key=args.include_piano_authorized_key).items()}, 'Rootfs changed while packaging')
     shutil.move(work / names[0], output / names[0])
     result = {'schema_version': 1, 'status': 'HOST_BUILT_NOT_DEVICE_READY', 'kernel_release': release, 'root_policy': args.root_selector,
               'epoch': args.epoch, 'mkbootimg': maker_source, 'device_operation_performed': False, 'device_ready': False,
@@ -595,6 +629,8 @@ def parser():
     ap.add_argument('--root-size-mib', type=int)
     ap.add_argument('--root-archive', action='store_true',
                     help='Also export root.tar.zst when building a root.ext4.img')
+    ap.add_argument('--include-piano-authorized-key', action='store_true',
+                    help='Include only the piano authorized key matching debug_access in the rootfs manifest')
     epoch = os.environ.get('SOURCE_DATE_EPOCH')
     if epoch is None:
         epoch = subprocess.check_output(

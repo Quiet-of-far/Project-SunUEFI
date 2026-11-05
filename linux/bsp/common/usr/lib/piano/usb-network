@@ -19,6 +19,10 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 set -eu
+USB_DEVICE_MAC=02:11:22:33:44:55
+USB_HOST_MAC=02:66:77:88:99:aa
+USB_SERIAL=0123456789
+[ ! -r /etc/piano/usb-network.conf ] || . /etc/piano/usb-network.conf
 if [ "${1:-start}" = stop ]; then
     g=/sys/kernel/config/usb_gadget/piano
     if [ -r "$g/UDC" ] && [ -n "$(cat "$g/UDC")" ]; then
@@ -49,11 +53,11 @@ if [ ! -s "$g/UDC" ] || [ -z "$(cat "$g/UDC")" ]; then
     mkdir -p "$g/strings/0x409" "$g/configs/b.1/strings/0x409"
     echo piano-linux > "$g/strings/0x409/manufacturer"
     echo 'Piano Linux USB' > "$g/strings/0x409/product"
-    echo 0123456789 > "$g/strings/0x409/serialnumber"
+    echo "$USB_SERIAL" > "$g/strings/0x409/serialnumber"
     if [ ! -d "$g/functions/ncm.usb0" ]; then
         mkdir -p "$g/functions/ncm.usb0"
-        echo 02:11:22:33:44:55 > "$g/functions/ncm.usb0/dev_addr"
-        echo 02:66:77:88:99:aa > "$g/functions/ncm.usb0/host_addr"
+        echo "$USB_DEVICE_MAC" > "$g/functions/ncm.usb0/dev_addr"
+        echo "$USB_HOST_MAC" > "$g/functions/ncm.usb0/host_addr"
     fi
     echo ncm > "$g/configs/b.1/strings/0x409/configuration"
     echo 500 > "$g/configs/b.1/MaxPower"

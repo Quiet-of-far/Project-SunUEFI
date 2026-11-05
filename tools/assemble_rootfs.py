@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Small distro/desktop dispatcher. Builds userspace, then installs target BSP packages."""
+"""Assemble the Arch Linux ARM base, niri session and native BSP packages."""
 import argparse
+from contextlib import ExitStack
 import hashlib
 import json
 import os
@@ -13,7 +14,7 @@ import subprocess
 import sys
 import tarfile
 from urllib.parse import urlsplit
-from build_chroot import stop_helpers
+from build_chroot import bind_devices, stop_helpers
 from build_piano_ram_bootstrap import guest_resolve
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,11 +38,6 @@ def public_url(value):
 def inside(root, path):
     if not path.parent.resolve().is_relative_to(root.resolve()): raise ValueError('Base guest symlink redirects a host write')
     return path
-
-
-def apt_available(text):
-    match = re.search(r'^\s*Candidate:\s*(\S+)', text, re.M)
-    return bool(match and match[1] != '(none)')
 
 
 def bundle(folder, target):
@@ -77,20 +73,18 @@ def plan(args, root=ROOT):
     result['storage'] = json.loads((profiles / 'storage.json').read_text())
     if state == 'unavailable':
         return {**result, 'status': 'UNAVAILABLE', 'reason': 'No reviewed package recipe for this distro/desktop pair'}
-    if args.distro != 'deepin' and result['target']['suite'] != profile['suite']:
+    if result['target']['suite'] != profile['suite']:
         raise ValueError('Suite differs from the selected reviewed distro profile')
-    if not 100 <= args.scale_percent <= 300 or (args.desktop == 'gnome' and args.scale_percent % 100):
-        raise ValueError('Scale is 100..300%; GNOME lightweight integer defaults accept 100/200/300')
-    for key in ('base_url', 'base_sha256', 'base_signature_url', 'base_keyring', 'base_keyring_sha256', 'keyring', 'sources_list'):
+    if not 100 <= args.scale_percent <= 300:
+        raise ValueError('Scale is 100..300%')
+    for key in ('base_url', 'base_sha256'):
         result[key] = getattr(args, key, None) or profile.get(key)
     result['base_file'] = str(args.base_file.resolve()) if getattr(args, 'base_file', None) else None
-    if profile['backend'] != 'debootstrap':
-        required = ['base_url', 'base_sha256'] if args.distro == 'arch' else profile['required_inputs']
-        for key in required:
-            if not (result['target']['suite'] if key == 'suite' else result.get(key)): result['missing_inputs'].append(key)
-        for key in ('base_url', 'base_signature_url'):
-            if result.get(key): public_url(result[key])
-        if result.get('base_sha256') and not re.fullmatch(r'[0-9a-f]{64}', result['base_sha256']): raise ValueError('Invalid base SHA256')
+    for key in ('base_url', 'base_sha256'):
+        if not result.get(key): result['missing_inputs'].append(key)
+    if result.get('base_url'): public_url(result['base_url'])
+    if result.get('base_sha256') and not re.fullmatch(r'[0-9a-f]{64}', result['base_sha256']):
+        raise ValueError('Invalid base SHA256')
     if args.bsp:
         result['bsp'] = bundle(args.bsp, result['target'])
         result['layers'] = [bundle(path, result['target']) for path in args.layer]
@@ -116,19 +110,6 @@ def validate_archive(path):
             raise ValueError('Base archive path or symlink-parent escapes extraction')
         if item.islnk() and (PurePosixPath(item.linkname).is_absolute() or '..' in PurePosixPath(item.linkname).parts):
             raise ValueError('Base archive hardlink escapes extraction')
-
-
-def deepin_sources(text, suite):
-    rows = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith('#'): continue
-        match = re.fullmatch(r'deb\s+(https://\S+)\s+(\S+)\s+(.+)', line)
-        if not match or match[2] != suite or not urlsplit(match[1]).hostname.endswith(('.deepin.com', '.deepin.org')):
-            raise ValueError('Deepin sources must be explicit Deepin-only HTTPS deb entries for this suite; no Debian/Ubuntu mixing')
-        rows.append(f'deb [signed-by=/usr/share/keyrings/sunuefi-archive.gpg] {match[1]} {suite} {match[3]}')
-    if not rows: raise ValueError('Deepin APT source list is empty')
-    return rows
 
 
 def clean_identity(root, guest):
@@ -175,26 +156,67 @@ def configure_desktop(root, result, guest, optional):
     skeleton = inside(root, root / 'etc/skel')
     if skeleton.is_symlink(): raise ValueError('Guest skeleton redirects a host write')
     skeleton.mkdir(parents=True, exist_ok=True)
-    if desktop == 'gnome':
-        from stage_piano_full_userspace import stage_gnome_power
-        result['gnome_power_files'] = stage_gnome_power(root)
-        path = inside(root, root / 'etc/dconf/db/local.d/00-sunuefi'); path.parent.mkdir(parents=True, exist_ok=True)
-        text = (ROOT / 'linux/desktops/gnome/defaults.ini').read_text().replace('uint32 2', 'uint32 ' + str(scale // 100))
-        path.write_text(text); profile = inside(root, root / 'etc/dconf/profile/user'); profile.parent.mkdir(parents=True, exist_ok=True)
-        profile.write_text('user-db:user\nsystem-db:local\n'); guest(['dconf', 'update'])
-    elif desktop == 'kde':
-        path = skeleton / '.config/plasma-workspace/env/sunuefi-scale.sh'; path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f'export QT_SCALE_FACTOR="${{QT_SCALE_FACTOR:-{scale / 100:g}}}"\n')
-        entry = root / 'usr/share/applications/com.github.maliit.keyboard.desktop'
-        if 'maliit-keyboard' in optional and entry.is_file():
-            path = skeleton / '.config/kwinrc'; path.write_text('[Wayland]\nInputMethod=/usr/share/applications/com.github.maliit.keyboard.desktop\n')
+    if desktop == 'niri':
+        config = skeleton / '.config/niri/config.kdl'; config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            '// Piano Arch Linux ARM starter session; outputs use automatic settings.\n'
+            '// Let logind handle the power key, including the key used to resume.\n'
+            'input {\n    disable-power-key-handling\n}\n'
+            'spawn-at-startup "waybar"\n'
+            'spawn-at-startup "mako"\n'
+            'spawn-at-startup "squeekboard"\n'
+            'spawn-at-startup "/usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1"\n'
+            'binds {\n'
+            '    XF86AudioRaiseVolume allow-when-locked=true { spawn "wpctl" "set-volume" "@DEFAULT_AUDIO_SINK@" "5%+" "--limit" "1.0"; }\n'
+            '    XF86AudioLowerVolume allow-when-locked=true { spawn "wpctl" "set-volume" "@DEFAULT_AUDIO_SINK@" "5%-"; }\n'
+            '    XF86AudioMute allow-when-locked=true { spawn "wpctl" "set-mute" "@DEFAULT_AUDIO_SINK@" "toggle"; }\n'
+            '    Mod+Return { spawn "foot"; }\n'
+            '    Mod+D { spawn "fuzzel"; }\n'
+            '    Mod+Q { close-window; }\n'
+            '    Mod+Left { focus-column-left; }\n'
+            '    Mod+Right { focus-column-right; }\n'
+            '    Mod+Up { focus-window-up; }\n'
+            '    Mod+Down { focus-window-down; }\n'
+            '    Mod+Shift+Left { move-column-left; }\n'
+            '    Mod+Shift+Right { move-column-right; }\n'
+            '    Mod+Shift+Up { move-window-up; }\n'
+            '    Mod+Shift+Down { move-window-down; }\n'
+            '    Mod+F { maximize-column; }\n'
+            '    Mod+Shift+F { fullscreen-window; }\n'
+            '    Mod+Shift+E { quit; }\n'
+            '    Print { screenshot; }\n'
+            '}\n')
+        power = inside(root, root / 'etc/systemd/logind.conf.d/50-niri-power.conf')
+        power.parent.mkdir(parents=True, exist_ok=True)
+        power.write_text('[Login]\nHandlePowerKey=suspend\n')
+        waybar = skeleton / '.config/waybar'
+        waybar.mkdir(parents=True, exist_ok=True)
+        (waybar / 'config.jsonc').write_text(
+            '{\n'
+            '  "layer": "top",\n'
+            '  "position": "top",\n'
+            '  "height": 42,\n'
+            '  "modules-left": ["custom/launcher", "niri/workspaces"],\n'
+            '  "modules-right": ["network", "pulseaudio", "battery", "clock"],\n'
+            '  "custom/launcher": {"format": "Apps", "tooltip": false, "on-click": "wofi --show drun"},\n'
+            '  "niri/workspaces": {"format": "{name}"},\n'
+            '  "network": {"format-wifi": "Wi-Fi {essid}", "format-disconnected": "Wi-Fi off"},\n'
+            '  "pulseaudio": {"format": "Audio {volume}%", "format-muted": "Audio muted"},\n'
+            '  "battery": {"format": "Battery {capacity}%"},\n'
+            '  "clock": {"format": "{:%H:%M  %a %d %b}"}\n'
+            '}\n')
+        (waybar / 'style.css').write_text(
+            '* { font-family: sans-serif; font-size: 15px; }\n'
+            'window#waybar { background: #202522; color: #eef2ec; }\n'
+            '#custom-launcher, #workspaces button, #network, #pulseaudio, #clock { min-height: 34px; padding: 0 14px; }\n'
+            '#custom-launcher { background: #9bd267; color: #162016; font-weight: bold; }\n'
+            '#workspaces button.focused { background: #476b58; color: #fff; }\n')
     else:
-        (skeleton / 'SUNUEFI-FIRST-SETUP.txt').write_text('Set display scaling in DDE Settings. OSK and sensor rotation have not been verified.\n')
-    manager = 'arch' if result['distro'] == 'arch' else 'apt'; dm = result['desktop_profile']['display_manager'][manager]
-    if dm in ('gdm', 'gdm3'):
-        path = root / ('etc/gdm/custom.conf' if dm == 'gdm' else 'etc/gdm3/daemon.conf'); text = '[daemon]\nAutomaticLoginEnable=true\nAutomaticLogin=piano\n'
-    elif dm == 'sddm': path = root / 'etc/sddm.conf.d/10-sunuefi.conf'; text = '[Autologin]\nUser=piano\nSession=plasmawayland\n'
-    else: path = root / 'etc/lightdm/lightdm.conf.d/10-sunuefi.conf'; text = '[Seat:*]\nautologin-user=piano\n'
+        raise ValueError('Only the niri desktop is supported')
+    path = root / 'etc/greetd/config.toml'
+    text = ('[terminal]\nvt = 1\n\n'
+            '[initial_session]\ncommand = "niri-session"\nuser = "piano"\n\n'
+            '[default_session]\ncommand = "tuigreet --time --remember --cmd niri-session"\nuser = "greeter"\n')
     inside(root, path).parent.mkdir(parents=True, exist_ok=True); path.write_text(text)
 
 
@@ -203,7 +225,7 @@ def execute(result):
     if os.geteuid(): raise ValueError('--execute requires a root build runner with private mount/chroot capability')
     out = Path(result['output']); root = out / 'rootfs'; profile = result['profile']; arch = profile['package_arch']
     if out.exists(): raise ValueError('Output appeared after planning')
-    out.mkdir(parents=True); root.mkdir(); mounted = []; log = out / 'build.log'
+    out.mkdir(parents=True); root.mkdir(); mounted = []; devices = ExitStack(); log = out / 'build.log'
     cross = platform.machine() not in ('aarch64', 'arm64')
     def run(args, **kwargs):
         with log.open('a') as stream: return subprocess.run(list(map(str, args)), stdout=stream, stderr=subprocess.STDOUT, check=True, **kwargs)
@@ -218,95 +240,70 @@ def execute(result):
         if not check: return subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return run(argv, input=input, text=input is not None)
     try:
-        if profile['backend'] == 'debootstrap':
-            key = Path(result['keyring']);
-            if not key.is_file(): raise ValueError('Install the selected distro archive keyring first')
-            run(['debootstrap', '--foreign', '--arch=' + arch, '--include=ca-certificates', '--components=' + ','.join(profile['components']),
-                 '--force-check-gpg', '--keyring=' + str(key), result['target']['suite'], root, profile['mirror']])
+        base = out / 'base.tar'
+        if result.get('base_file'):
+            shutil.copyfile(result['base_file'], base)
         else:
-            base = out / 'base.tar'
-            if result.get('base_file'):
-                shutil.copyfile(result['base_file'], base)
-            else:
-                run(['curl', '-fL', '--proto', '=https', '--output', base, result['base_url']])
-            if sha(base) != result['base_sha256']: raise ValueError('Downloaded base digest differs')
-            if profile['id'] == 'deepin':
-                key = Path(result['base_keyring'])
-                if sha(key) != result['base_keyring_sha256']: raise ValueError('Base public keyring hash differs')
-                sig = out / 'base.sig'; run(['curl', '-fL', '--proto', '=https', '--output', sig, result['base_signature_url']])
-                run(['gpgv', '--keyring', key, sig, base])
-            validate_archive(base); run(['bsdtar', '-xpf', base, '-C', root])
+            run(['curl', '-fL', '--proto', '=https', '--output', base, result['base_url']])
+        if sha(base) != result['base_sha256']: raise ValueError('Downloaded base digest differs')
+        validate_archive(base); run(['bsdtar', '-xpf', base, '-C', root])
         if cross:
             qemu = shutil.which('qemu-aarch64-static'); entry = Path('/proc/sys/fs/binfmt_misc/qemu-aarch64')
             if not qemu or not entry.is_file() or 'enabled' not in entry.read_text(): raise ValueError('x86 build needs qemu-aarch64-static and enabled binfmt')
             (root / 'usr/bin').mkdir(parents=True, exist_ok=True); shutil.copy2(qemu, root / 'usr/bin/qemu-aarch64-static')
-        if profile['backend'] == 'debootstrap': guest(['/debootstrap/debootstrap', '--second-stage'])
         release = dict(re.findall(r'^([A-Z_]+)=(.*)$', guest_resolve(root, '/etc/os-release').read_text(), re.M))
-        allowed = {'arch', 'archarm', 'archlinuxarm'} if profile['id'] == 'arch' else {profile['id']}
+        allowed = {'arch', 'archarm', 'archlinuxarm'}
         if release.get('ID', '').strip('"') not in allowed: raise ValueError('Imported base is not the selected distro')
-        executable = guest_resolve(root, '/usr/bin/pacman' if profile['id'] == 'arch' else '/usr/bin/dpkg').read_bytes()[:20]
+        executable = guest_resolve(root, '/usr/bin/pacman').read_bytes()[:20]
         if len(executable) < 20 or executable[:6] != b'\x7fELF\x02\x01' or struct.unpack_from('<H', executable, 18)[0] != 183:
             raise ValueError('Imported base package manager is not AArch64')
-        for name, kind, options in (('proc', 'proc', ''), ('sys', 'sysfs', 'ro'), ('dev', 'tmpfs', ''), ('run', 'tmpfs', '')):
+        for name, kind, options in (('proc', 'proc', ''), ('sys', 'sysfs', 'ro'), ('run', 'tmpfs', '')):
             path = root / name
             if path.is_symlink(): raise ValueError('Guest virtual mountpoint is a symlink')
             path.mkdir(exist_ok=True); run(['mount', '-t', kind, *(['-o', options] if options else []), kind, path]); mounted.append(path)
-        for name, major, minor in (('null', 1, 3), ('zero', 1, 5), ('random', 1, 8), ('urandom', 1, 9), ('tty', 5, 0)):
-            run(['mknod', '-m', '666', root / 'dev' / name, 'c', str(major), str(minor)])
+        (root / 'dev').mkdir(exist_ok=True)
+        if (root / 'dev').is_symlink(): raise ValueError('Guest virtual mountpoint is a symlink')
+        devices.enter_context(bind_devices(root, run, tty=True))
         for name, target in (('fd', '/proc/self/fd'), ('stdin', '/proc/self/fd/0'),
                              ('stdout', '/proc/self/fd/1'), ('stderr', '/proc/self/fd/2')):
             (root / 'dev' / name).symlink_to(target)
         inside(root, root / 'etc/resolv.conf').unlink(missing_ok=True); shutil.copyfile('/etc/resolv.conf', root / 'etc/resolv.conf')
         policy = inside(root, root / 'usr/sbin/policy-rc.d'); policy.parent.mkdir(parents=True, exist_ok=True); policy.write_text('#!/bin/sh\nexit 101\n'); policy.chmod(0o755)
-        manager = 'arch' if profile['id'] == 'arch' else 'apt'
-        if manager == 'apt':
-            rows = profile.get('sources') if profile['id'] != 'deepin' else deepin_sources(Path(result['sources_list']).read_text(), result['target']['suite'])
-            for path in (root / 'etc/apt/sources.list.d').glob('*'):
-                if path.suffix in ('.list', '.sources'): path.unlink()
-            if profile['id'] == 'deepin':
-                keyring = inside(root, root / 'usr/share/keyrings/sunuefi-archive.gpg'); keyring.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(result['keyring'], keyring)
-            (root / 'etc/apt/sources.list').write_text('\n'.join(rows) + '\n'); guest(['apt-get', 'update'])
-        else:
-            conf = root / 'etc/pacman.conf'; text = conf.read_text()
-            if not re.search(r'^\s*SigLevel\s*=\s*Required\b', text, re.M) or re.search(r'^\s*SigLevel\s*=.*Never', text, re.M): raise ValueError('Pacman repository signatures must remain required')
-            conf.write_text(re.sub(r'^\s*Architecture\s*=.*$', 'Architecture = aarch64', text, flags=re.M))
-            # libalpm cannot resolve the host mount table's paths from a
-            # chroot. Leave the installed CheckSpace policy unchanged.
-            (root / 'run/pacman-build.conf').write_text(
-                re.sub(r'^\s*CheckSpace\s*$', '# CheckSpace (build chroot)', conf.read_text(), flags=re.M))
-            guest(['pacman-key', '--init']); guest(['pacman-key', '--populate', 'archlinuxarm']); guest(['pacman', '-Syu', '--noconfirm'])
+        manager = 'arch'
+        conf = root / 'etc/pacman.conf'; text = conf.read_text()
+        if not re.search(r'^\s*SigLevel\s*=\s*Required\b', text, re.M) or re.search(r'^\s*SigLevel\s*=.*Never', text, re.M): raise ValueError('Pacman repository signatures must remain required')
+        conf.write_text(re.sub(r'^\s*Architecture\s*=.*$', 'Architecture = aarch64', text, flags=re.M))
+        # libalpm cannot resolve the host mount table's paths from a
+        # chroot. Leave the installed CheckSpace policy unchanged.
+        (root / 'run/pacman-build.conf').write_text(
+            re.sub(r'^\s*CheckSpace\s*$', '# CheckSpace (build chroot)', conf.read_text(), flags=re.M))
+        guest(['pacman-key', '--init']); guest(['pacman-key', '--populate', 'archlinuxarm']); guest(['pacman', '-Syu', '--noconfirm'])
         packages = profile['base_packages'] + result['desktop_profile'][manager + '_packages']; optional = []
         for package in packages + result['desktop_profile'].get('optional_packages', []):
-            found = apt_available(guest(['apt-cache', 'policy', package], text=True)) if manager == 'apt' else guest(['pacman', '-Si', package], check=False).returncode == 0
+            found = guest(['pacman', '-Si', package], check=False).returncode == 0
             if not found and package in packages: raise ValueError('UNAVAILABLE target desktop package: ' + package)
             if found and package not in packages: optional.append(package)
-        guest((['apt-get', 'install', '-y', '--no-install-recommends'] if manager == 'apt' else ['pacman', '-S', '--needed', '--noconfirm']) + packages + optional)
-        inventory = guest(['dpkg-query', '-W', '-f=${binary:Package}\n'], text=True) if manager == 'apt' else guest(['pacman', '-Qq'], text=True)
+        guest(['pacman', '-S', '--needed', '--noconfirm'] + packages + optional)
+        inventory = guest(['pacman', '-Qq'], text=True)
         generic = [name for name in inventory.splitlines() if name.startswith(('linux-image', 'linux-headers', 'linux-aarch64'))]
-        if generic: guest((['apt-get', 'purge', '-y'] if manager == 'apt' else ['pacman', '-R', '--noconfirm']) + generic)
+        if generic: guest(['pacman', '-R', '--noconfirm'] + generic)
         for item in ([result['bsp']] if result['bsp'] else []) + result['layers']:
             if item.get('component') in ('mesa', 'runtime') and item.get('libc') != 'static':
                 actual = guest(['getconf', 'GNU_LIBC_VERSION'], text=True).strip().split()[-1]
                 if item.get('glibc_version') != actual: raise ValueError('Compiled layer glibc does not match the target root')
             for package in item['packages']:
                 if sha(package) != item['files'][Path(package).name]['sha256']: raise ValueError('Package changed after planning')
-                if manager == 'apt':
-                    pkg_arch = subprocess.check_output(['dpkg-deb', '-f', package, 'Architecture'], text=True).strip()
-                    if pkg_arch not in ([arch, 'all'] if item.get('component') in ('config', 'firmware') else [arch]): raise ValueError('Compiled package architecture differs')
-                    if not package.endswith('.deb'): raise ValueError('APT target requires its own .deb packages')
-                else:
-                    if package.endswith('.deb'): raise ValueError('Arch cannot use a Debian/Ubuntu .deb')
-                    info = subprocess.check_output(['bsdtar', '-xOf', package, '.PKGINFO'], text=True)
-                    pkg_arch = re.search(r'^arch = (\S+)$', info, re.M)
-                    if not pkg_arch or pkg_arch[1] not in (['aarch64', 'any'] if item.get('component') in ('config', 'firmware') else ['aarch64']): raise ValueError('Arch package architecture differs')
+                if package.endswith('.deb'): raise ValueError('Arch cannot use a Debian/Ubuntu .deb')
+                info = subprocess.check_output(['bsdtar', '-xOf', package, '.PKGINFO'], text=True)
+                pkg_arch = re.search(r'^arch = (\S+)$', info, re.M)
+                if not pkg_arch or pkg_arch[1] not in (['aarch64', 'any'] if item.get('component') in ('config', 'firmware') else ['aarch64']): raise ValueError('Arch package architecture differs')
             dest = root / 'tmp/bsp-packages'; dest.mkdir(parents=True, exist_ok=True)
             for package in item['packages']: shutil.copy2(package, dest / Path(package).name)
             files = ['/tmp/bsp-packages/' + Path(p).name for p in item['packages']]
-            guest((['apt-get', 'install', '-y'] if manager == 'apt' else ['pacman', '-U', '--noconfirm']) + files); shutil.rmtree(dest)
+            guest(['pacman', '-U', '--noconfirm'] + files); shutil.rmtree(dest)
         configure_desktop(root, result, guest, optional); clean_identity(root, guest)
         dm = result['desktop_profile']['display_manager'][manager]; guest(['systemctl', 'enable', dm, 'NetworkManager']); guest(['systemctl', 'set-default', 'graphical.target'])
-        packages = guest(['dpkg-query', '-W', '-f=${binary:Package}\t${Version}\t${Architecture}\n'], text=True) if manager == 'apt' else guest(['pacman', '-Q'], text=True)
+        packages = guest(['pacman', '-Q'], text=True)
         (out / 'packages.tsv').write_text(packages); policy.unlink()
         if cross: (root / 'usr/bin/qemu-aarch64-static').unlink()
         result.update(status='HOST_ROOTFS_DESKTOP_BSP_BUILT_NOT_BOOT_VERIFIED' if result['bsp'] else 'HOST_ROOTFS_DESKTOP_BUILT_BSP_PENDING',
@@ -314,14 +311,15 @@ def execute(result):
                       generic_kernels_removed=generic,
                       login=json.loads((ROOT / 'config/release.json').read_text())['login'],
                       bit_reproducible=False)
-        metadata = [*(root / 'var/lib/apt/lists').glob('*InRelease'), *(root / 'etc/apt').rglob('*.list'), *(root / 'etc/apt').rglob('*.sources')] if manager == 'apt' else list((root / 'var/lib/pacman/sync').glob('*'))
+        metadata = list((root / 'var/lib/pacman/sync').glob('*'))
         result['repository_metadata'] = {str(p.relative_to(root)): sha(p) for p in metadata if p.is_file()}
     except Exception as exc:
         (out / 'FAILED.json').write_text(json.dumps({'status': 'BUILD_FAILED', 'error': str(exc)}) + '\n'); raise
     finally:
-        if profile['id'] == 'arch' and (root / 'usr/bin/gpgconf').exists():
+        if (root / 'usr/bin/gpgconf').exists():
             guest(['gpgconf', '--homedir', '/etc/pacman.d/gnupg', '--kill', 'all'], check=False)
         stop_helpers(root)
+        devices.close()
         for path in reversed(mounted): run(['umount', path])
     for name in ('dev', 'proc', 'sys', 'run'):
         for path in (root / name).iterdir():
@@ -332,10 +330,10 @@ def execute(result):
 
 def parser():
     value = argparse.ArgumentParser(description=__doc__)
-    value.add_argument('--distro', choices=['debian', 'ubuntu', 'arch', 'deepin'], required=True)
-    value.add_argument('--desktop', choices=['gnome', 'kde', 'dde'], required=True)
-    for name in ('output', 'base-file', 'base-keyring', 'keyring', 'sources-list', 'bsp'): value.add_argument('--' + name, type=Path)
-    for name in ('suite', 'base-url', 'base-sha256', 'base-signature-url', 'base-keyring-sha256'): value.add_argument('--' + name)
+    value.add_argument('--distro', choices=['arch'], required=True)
+    value.add_argument('--desktop', choices=['niri'], required=True)
+    for name in ('output', 'base-file', 'bsp'): value.add_argument('--' + name, type=Path)
+    for name in ('suite', 'base-url', 'base-sha256'): value.add_argument('--' + name)
     value.add_argument('--layer', action='append', type=Path, default=[]); value.add_argument('--scale-percent', type=int, default=200)
     mode = value.add_mutually_exclusive_group(required=True); mode.add_argument('--plan', action='store_true'); mode.add_argument('--execute', action='store_true')
     value.add_argument('--worker', action='store_true', help=argparse.SUPPRESS); return value

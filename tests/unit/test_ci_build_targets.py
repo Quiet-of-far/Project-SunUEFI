@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
 import ci_build_targets as targets
 
-PRODUCTS = ['debian-gnome', 'debian-kde', 'nyarch-gnome', 'steamos']
+PRODUCTS = ['arch-niri']
 
 
 class CiBuildTargetsTests(unittest.TestCase):
@@ -33,11 +33,12 @@ class CiBuildTargetsTests(unittest.TestCase):
                                          'linux/dts/drafts/piano-pen-dock.dtso']), [])
         self.assertEqual(targets.select(['linux/dts/drafts/piano-pen-dock.dtso',
                                          'config/release.json']), PRODUCTS)
-        self.assertEqual(targets.select([], 'debian-gnome'), ['debian-gnome'])
+        self.assertEqual(targets.select([], 'arch-niri'), ['arch-niri'])
         self.assertEqual(targets.select(['linux/config'], 'uefi'), ['uefi'])
         self.assertEqual(targets.select(['config/release.json'], 'linux'), ['linux'])
-        with self.assertRaises(ValueError):
-            targets.select([], 'unknown')
+        for removed in ('debian-gnome', 'debian-kde', 'nyarch-gnome', 'steamos', 'unknown'):
+            with self.subTest(target=removed), self.assertRaises(ValueError):
+                targets.select([], removed)
 
     def test_real_git_diff_and_new_push_fallback(self):
         with tempfile.TemporaryDirectory(prefix='ci-targets-') as temporary:

@@ -1,4 +1,4 @@
-"""Release policy and dry planning with disposable trees; no APT/device/root calls."""
+"""Shared root policy, identity cleanup and Android block protection."""
 import copy
 import importlib.util
 from importlib.machinery import SourceFileLoader
@@ -15,8 +15,7 @@ from unittest.mock import patch
 
 PROJECT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT / 'tools'))
-SPEC = importlib.util.spec_from_file_location('release_rootfs', PROJECT / 'tools/build_release_rootfs.py')
-builder = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(builder)
+from rootfs import common as builder
 CONFIG = json.loads((PROJECT / 'config/release.json').read_text())
 BOOT = (PROJECT / 'linux/userspace/disk-bootstrap').read_text()
 LOADER = SourceFileLoader('canonical_label_adapter', str(PROJECT / 'linux/userspace/piano-ram-hardware-prepare'))
@@ -40,9 +39,6 @@ class ReleaseRootTests(unittest.TestCase):
         self.m = {'source_commit': 'a' * 40, 'source_clean': True, 'root_policy': 'LABEL=PIANOROOT',
                   'command_line': 'rdinit=/pianoinit piano.root=LABEL=PIANOROOT', 'kernel_release': 'fixture-release'}
 
-    def planned(self):
-        with patch.object(builder.modules, 'inspect', return_value=(self.m, 'b' * 64)), patch.object(builder, 'repository', return_value='a' * 40):
-            return builder.plan(self.kernel, self.source, self.output, root=self.root)
 
     def policy_tree(self):
         for name in ('usr/lib/piano', 'etc/systemd/system', 'etc/ssh', 'home/piano/.ssh', 'root/.ssh', 'dev', 'proc', 'sys', 'run'):
@@ -51,43 +47,10 @@ class ReleaseRootTests(unittest.TestCase):
         for name in ('piano-display.service', 'piano-touch.service', 'piano-keyboard.service', 'piano-audio.service'):
             (self.rootfs / 'etc/systemd/system' / name).write_text('hardware fixture ' + name)
 
-    def test_plan_does_not_create_output_or_execute_commands(self):
-        with patch.object(builder.subprocess, 'run', side_effect=AssertionError('plan executed a command')):
-            result = self.planned()
-        self.assertEqual(result['status'], 'PLAN_ONLY'); self.assertEqual(result['root_policy'], 'LABEL=PIANOROOT')
-        self.assertIn('Piano Mesa .deb directory (--mesa-dir)', result['missing_inputs'])
-        self.assertTrue(any('build-rootfs.sh' in step for step in result['steps']))
-        self.assertFalse(self.output.exists())
 
-    def test_existing_output_and_path_outside_project_are_refused(self):
-        self.output.mkdir(parents=True)
-        with self.assertRaisesRegex(ValueError, 'new project'):
-            self.planned()
-        with self.assertRaisesRegex(ValueError, 'new project'):
-            builder.plan(self.kernel, self.source, self.root / 'old-root', root=self.root)
 
-    def test_kernel_uuid_userdata_and_wrong_actual_commit_are_refused(self):
-        for policy, command in (('PARTUUID=fixture', 'piano.root=PARTUUID=fixture'),
-                                ('LABEL=PIANOROOT', 'piano.root=LABEL=PIANOROOT root=PARTLABEL=userdata'),
-                                ('LABEL=PIANOROOT', 'piano.root=LABEL=PIANOROOT root=/dev/sda'),
-                                ('LABEL=PIANOROOT', 'piano.root=LABEL=PIANOROOT piano.root=LABEL=PIANOROOT')):
-            self.m.update(root_policy=policy, command_line=command)
-            with self.subTest(policy=policy), self.assertRaisesRegex(ValueError, 'never Android'):
-                self.planned()
-        self.m.update(root_policy='LABEL=PIANOROOT', command_line='piano.root=LABEL=PIANOROOT', source_commit='c' * 40)
-        with self.assertRaisesRegex(ValueError, 'prepared release source'):
-            self.planned()
 
-    def test_missing_inputs_cannot_be_reported_as_a_real_build(self):
-        record = self.planned()
-        with patch.object(builder.subprocess, 'run', side_effect=AssertionError('missing input installed something')):
-            with self.assertRaisesRegex(ValueError, 'Missing inputs'):
-                builder.execute(record)
-        self.assertFalse(self.output.exists())
 
-    def test_nonroot_runner_is_refused_before_host_build(self):
-        with patch.object(builder.os, 'geteuid', return_value=1000), self.assertRaisesRegex(ValueError, 'requires root'):
-            builder.require_host()
 
     def test_label_policy_preserves_hardware_and_protects_android(self):
         self.policy_tree()
@@ -135,11 +98,6 @@ class ReleaseRootTests(unittest.TestCase):
             builder.apply_policy(self.rootfs, self.output, CONFIG)
         self.assertFalse((old / 'root-policy.json').exists())
 
-    def test_snapshot_claim_without_implemented_snapshot_runner_is_rejected(self):
-        config = copy.deepcopy(CONFIG); config['debian']['apt_policy'] = 'snapshot'; config['debian']['snapshot'] = 'unverified'
-        (self.root / 'config/release.json').write_text(json.dumps(config))
-        with self.assertRaisesRegex(ValueError, 'snapshot mode'):
-            self.planned()
 
     def test_real_shell_selector_rejects_android_uuid_and_duplicates(self):
         guard = BOOT[BOOT.index('selected=0'):BOOT.index('dma_routes() {')]

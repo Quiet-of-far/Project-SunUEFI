@@ -27,9 +27,10 @@ PORTABLE = (
     'tests/unit/test_ci_build_targets.py',
     'tests/unit/test_vendor_inputs.py',
     'tests/unit/test_release_kernel.py',
-    'tests/unit/test_release_rootfs.py',
+    'tests/unit/test_rootfs_common.py',
     'tests/unit/test_install_piano.py',
     'tests/unit/test_assemble_rootfs.py',
+    'tests/unit/test_arch_niri_rootfs.py',
     'tests/unit/test_bsp_package.py',
 )
 

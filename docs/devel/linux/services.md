@@ -15,7 +15,6 @@
 | 相机自动曝光稳定性 | [`tools/patches/piano-camerad-stable-ae.patch`](../../../tools/patches/piano-camerad-stable-ae.patch) | 同一 `derive_camerad_source()` 顺序应用 CCM 和 AE 补丁，两条 helper 构建入口使用相同源码 |
 | 音频 UCM、模块加载参数、udev 配置 | [`linux/bsp/common/`](../../../linux/bsp/common/) | 按目录布局安装；文件清单在 `linux/bsp/manifest.json` |
 | Linux 调试入口与引导脚本 | [`linux/userspace/`](../../../linux/userspace/) | 包含 `piano-debug-bootstrap`、debug/serial unit、磁盘与 RAM 引导脚本 |
-| GNOME 电源键与保护套合盖 | [`linux/desktops/gnome/power-overlay/`](../../../linux/desktops/gnome/power-overlay/) | 复用 `piano-power-button.service`，完整 stager 和 GNOME 组装安装同一份源码；当前只控制背光，锁屏/睡眠限制见[说明](../hardware/power-button.md) |
 | 内核配置与板级设备树 | [`linux/configs/`](../../../linux/configs/) 与 [`linux/dts/`](../../../linux/dts/) | 内核源码位于 `upstream/linux-piano/`，补丁来源见内核角色说明 |
 
 例如，`piano-keyboard.service` 调用 `/usr/lib/piano/keyboard-start`。它的原版脚本在上游 overlay，本地等待参数由 `stage_piano_ram_hardware.py` 添加，DMA 状态读取函数则在 `linux/userspace/piano-ram-hardware-prepare`。热更新设备后，修复仍必须保存在这些构建输入中，下一次制作 rootfs 才能保留。
@@ -36,7 +35,11 @@
 
 通用多发行版路径由 [`tools/assemble_rootfs.py`](../../../tools/assemble_rootfs.py) 安装发行版、桌面和显式选择的 BSP/运行时包；[`tools/package_bsp.py`](../../../tools/package_bsp.py) 按 `linux/bsp/manifest.json` 打包本地配置。配置包本身不自动启用服务，也不包含内核模块或原生程序。
 
-现有 Debian GNOME release 路径由 [`tools/build_release_rootfs.py`](../../../tools/build_release_rootfs.py) 调用上游 rootfs 构建，随后依次运行 `stage_piano_full_userspace.stage()`、`stage_piano_ram_hardware.build()`、内核模块安装和原生 helper 安装，再处理磁盘启动策略。其基础 unit 与服务启用链接来自上游 overlay，**没有通过 `package_bsp.py` 安装整个本地配置包**。因此只修改 `linux/bsp/common/`，不能假定 release 路径一定包含改动；需要核对对应安装步骤。
+Arch+niri 由 `tools/build_arch_niri_rootfs.py` 和 `tools/stage_arch_piano.py`
+装配。固定的上游 overlay 提供硬件服务，再安装本项目的适配器、内核模块和原生
+helper，并应用独立 root 分区策略。`tools/rootfs/` 保存公共的构建和启动工具。
+因此只修改 `linux/bsp/common/` 时，仍需核对实际 staging 路径是否安装了该文件。
+电源键由 logind 处理，配置与验证见[电源键和睡眠](../hardware/power-button.md)。
 
 ## 仍需收敛的地方
 

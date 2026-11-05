@@ -15,7 +15,8 @@ class PianoFullUserspaceTests(unittest.TestCase):
     def test_complete_real_overlay_keeps_hardware_services_and_replaces_only_root_policy(self):
         source=ROOT/'upstream/debian-piano-current'
         if not source.is_dir():self.skipTest('Pinned source not fetched')
-        with tempfile.TemporaryDirectory(dir=ROOT/'build',prefix='full-user-test-')as temporary:
+        (ROOT/'build/distros').mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT/'build/distros',prefix='full-user-test-')as temporary:
             target=Path(temporary)/'rootfs';target.mkdir()
             result=stage.stage(target,source)
             for name in ('display-start','touch-start','keyboard-start','radio-start','adsp-start','audio-start','video-start','camera-start'):

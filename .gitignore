@@ -9,5 +9,10 @@ uefi/platforms/pianoLinuxPkg/
 uefi/platforms/pianoProductPkg/
 __pycache__/
 *.pyc
+.env
+.env.*
+!.env.example
+.ssh/
+*.7z
 uefi/handoff/bootshim/BootShim.bin
 uefi/handoff/bootshim/BootShim.elf

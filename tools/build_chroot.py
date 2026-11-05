@@ -1,11 +1,40 @@
 """Stop helpers left inside a finished build root before unmounting its /dev."""
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import select
 import signal
 import stat
 import sys
+import tempfile
 import time
+
+
+@contextmanager
+def bind_devices(root, run, tty=False):
+    """Expose only basic character devices, including in rootless Podman."""
+    # A new tmpfs in a user namespace cannot host usable device nodes, even
+    # through individual bind mounts. A private directory in inherited /dev
+    # keeps that mount's device semantics without exposing its other devices.
+    with tempfile.TemporaryDirectory(prefix='sunuefi-build-', dir='/dev') as folder:
+        os.chmod(folder, 0o755)
+        mounted = []
+        dev = Path(root) / 'dev'
+        try:
+            run(['mount', '--bind', folder, dev])
+            mounted.append(dev)
+            for name in ('null', 'zero', 'random', 'urandom', *(('tty',) if tty else ())):
+                source = Path('/dev') / name
+                if not stat.S_ISCHR(source.stat().st_mode):
+                    raise ValueError('Expected a character device: ' + str(source))
+                target = dev / name
+                target.touch()
+                run(['mount', '--bind', source, target])
+                mounted.append(target)
+            yield
+        finally:
+            for path in reversed(mounted):
+                run(['umount', '--recursive', path])
 
 
 def remove_pacman_sockets(root):

@@ -74,7 +74,8 @@ def build(kernel, source, kernel_build, output, cc, sysroot, macros, loop):
     if 'clang' in Path(compiler).name:
         flags += ['--target=aarch64-linux-gnu']
         if sysroot:
-            flags += ['--sysroot=' + str(sysroot), '--gcc-toolchain=' + str(sysroot / 'usr')]
+            flags += ['--sysroot=' + str(sysroot), '--gcc-toolchain=' + str(sysroot / 'usr'),
+                      '-isystem', str(sysroot / 'usr/include/aarch64-linux-gnu')]
     if sysroot and 'clang' not in Path(compiler).name:
         flags += ['--sysroot=' + str(sysroot)]
     files = {}

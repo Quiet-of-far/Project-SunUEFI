@@ -24,7 +24,7 @@ import build_storage as storage
 import package_product_trampoline as trampoline
 
 ROOT = Path(__file__).resolve().parents[1]
-SYSROOT_PACKAGES = ('gcc', 'libc6-dev', 'uuid-dev', 'libblkid-dev')
+SYSROOT_PACKAGES = ('gcc', 'g++', 'libc6-dev', 'uuid-dev', 'libblkid-dev')
 STATIC_LIBRARIES = ('libc.a', 'libuuid.a', 'libblkid.a')
 
 

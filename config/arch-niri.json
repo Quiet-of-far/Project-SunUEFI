@@ -1,0 +1,33 @@
+{
+  "base_url": "https://ca.us.mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz",
+  "base_sha256": null,
+  "base_policy": "Verify the official detached signature using a pinned public keyring, or require an explicit SHA256; pacman package signatures remain required.",
+  "desktop": "niri",
+  "architecture": "aarch64",
+  "hardware_packages": [
+    "bluez",
+    "bluez-utils",
+    "wpa_supplicant",
+    "alsa-utils",
+    "alsa-ucm-conf",
+    "pipewire-audio",
+    "rtkit",
+    "libcanberra",
+    "ffmpeg",
+    "v4l-utils",
+    "python",
+    "python-pillow",
+    "python-numpy",
+    "zram-generator",
+    "upower",
+    "busybox",
+    "mesa-utils",
+    "vulkan-tools",
+    "noto-fonts-cjk",
+    "chromium",
+    "squeekboard",
+    "wofi"
+  ],
+  "keyring_url": "https://raw.githubusercontent.com/archlinuxarm/archlinuxarm-keyring/91e6b11698f8df66042d56aaa56fbe9c9263847d/archlinuxarm.gpg",
+  "keyring_sha256": "50a08f82ce3cd524a552da4bfa37f3e04b2c9da468e2fce5783474b58a34c518"
+}

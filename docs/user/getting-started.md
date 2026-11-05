@@ -8,20 +8,15 @@
 * Bootloader 已解锁，已安装 KernelSU 或 SukiSU。
 * 平板上留出足够的空间，并备份重要数据。独立分区会从 Android 的数据分区里划出空间。
 
-## 选一个系统
+## 系统镜像
 
-四个系统共用同一个启动镜像（ESP，即 EFI 系统分区），只有系统镜像（root，即根文件系统）不同。
-
-| 系统镜像 | 系统 | root 分区至少 | 适合 |
-| --- | --- | --- | --- |
-| `debian-gnome` | Debian 13 + GNOME | 8 GiB | 日常使用的通用桌面 |
-| `debian-kde` | Debian 13 + KDE Plasma | 8 GiB | 习惯 KDE Plasma 的用户，限制见[已知问题](known-issues.md#其他) |
-| `nyarch-gnome` | Arch Linux ARM + GNOME（Nyarch） | 16 GiB | 想用滚动更新的软件包和 Nyarch 主题 |
-| `steamos` | Valve SteamOS ARM64 | 16 GiB | 玩游戏，详见 [SteamOS](steamos.md) |
+本分支提供 Arch Linux ARM + niri。启动镜像是 ESP，系统镜像是 ext4 root，
+对应下载包为 `SunUEFI-ESP` 和 `SunUEFI-Root-arch-niri`。CI 系统镜像大小为
+16 GiB，首次启动时文件系统扩展到已分配分区的全部容量。
 
 ## 安装
 
-从 [Build products](https://github.com/slwyts/Project-SunUEFI/actions/workflows/build-products.yml) 同一次构建里下载三个包：`SunUEFI-Module`（引导助手模块）、`SunUEFI-ESP`（启动镜像）和 `SunUEFI-Root-发行版`（系统镜像）。把解压出来的模块 ZIP 和两个 `.sparse.img` 文件放到平板上，然后：
+从 [Build products](https://github.com/Quiet-of-far/Project-SunUEFI/actions/workflows/build-products.yml) 同一次构建里下载三个包：`SunUEFI-Module`（引导助手模块）、`SunUEFI-ESP`（启动镜像）和 `SunUEFI-Root-arch-niri`（系统镜像）。把解压出来的模块 ZIP 和两个 `.sparse.img` 文件放到平板上，然后：
 
 1. 在 KernelSU 或 SukiSU 的模块页面安装模块 ZIP，提示出现时按音量＋安装引导，重启。
 2. 在模块卡片上点 **打开 WebUI**，进入引导助手。
