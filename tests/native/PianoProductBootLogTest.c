@@ -48,8 +48,7 @@ STATIC CONST TEST_GLYPH Alphabet[]={
   {'W',{0x3f,0x40,0x38,0x40,0x3f}},{'X',{0x63,0x14,0x08,0x14,0x63}},
   {'Y',{0x07,0x08,0x70,0x08,0x07}},{'-',{8,8,8,8,8}},{' ',{0,0,0,0,0}}
 };
-STATIC VOID ExpectText(UINT32 Row,UINT32 CharacterColumn,CONST CHAR8 *Expected){
-  UINT32 Scale=Pitch/10,Y=PanelY+Row*Pitch,X=PanelX+6*Scale+CharacterColumn*6*Scale;
+STATIC VOID ExpectTextAt(UINT32 X,UINT32 Y,UINT32 Scale,CONST CHAR8 *Expected){
   for(UINT32 I=0;Expected[I];++I){UINT8 Columns[5]={0};
     for(UINT32 C=0;C<5;++C)for(UINT32 R=0;R<7;++R){
       EFI_GRAPHICS_OUTPUT_BLT_PIXEL P=Pixels[(Y+R*Scale)*Width+X+(I*6+C)*Scale];
@@ -61,6 +60,10 @@ STATIC VOID ExpectText(UINT32 Row,UINT32 CharacterColumn,CONST CHAR8 *Expected){
     }
     assert(Matched);
   }
+}
+STATIC VOID ExpectText(UINT32 Row,UINT32 CharacterColumn,CONST CHAR8 *Expected){
+  UINT32 Scale=Pitch/10,Y=PanelY+Row*Pitch,X=PanelX+6*Scale+CharacterColumn*6*Scale;
+  ExpectTextAt(X,Y,Scale,Expected);
 }
 STATIC VOID ExpectCode(UINT32 Row,CONST CHAR8 *Elapsed,CONST CHAR8 *Expected){
   UINT32 Columns=(UINT32)strlen(Elapsed);if(Columns<8)Columns=8;
@@ -92,13 +95,27 @@ int main(int Argc,char **Argv){
   assert(PianoProductBootLogStage("MENU",EFI_WARN_UNKNOWN_GLYPH,725)==EFI_SUCCESS);ExpectText(6,9,"FAILED");ExpectCode(6,"725 MS","0X0000000000000001");
   UINT32 Previous=Calls;assert(PianoProductBootLogStage("not-a-stage",EFI_SUCCESS,1)==EFI_INVALID_PARAMETER&&Calls==Previous);
   assert(PianoProductBootLogStage(NULL,EFI_SUCCESS,1)==EFI_INVALID_PARAMETER&&Calls==Previous);
+  assert(PianoProductBootLogStage("UFS CAPACITY",EFI_DEVICE_ERROR,528)==EFI_SUCCESS);
+  assert(PianoProductBootLogStage("not-a-stage",EFI_SUCCESS,1)==EFI_INVALID_PARAMETER);
+  assert(PianoProductBootLogMessage(L"未能启动系统",L"存储初始化失败",EFI_DEVICE_ERROR,TRUE)==EFI_SUCCESS);
+  UINT32 FailureScale=Height/440,FailureY=Height*26/100+140*FailureScale;
+  ExpectTextAt(Width*7/100,FailureY,FailureScale,"0X8000000000000007");
+  ExpectTextAt(Width*7/100+20*6*FailureScale,FailureY,FailureScale,"UFS CAPACITY");
+  assert(PianoProductBootLogDiagnostic("REPORT LUNS LUN 0 TRY 3 BYTES 0",
+    "OCS 00 SCSI 02 SENSE 06 29 00 LEN 18")==EFI_SUCCESS);
+  UINT32 DiagnosticScale=Height/660,DiagnosticY=Height*26/100+158*FailureScale;
+  ExpectTextAt(Width*7/100,DiagnosticY,DiagnosticScale,"REPORT LUNS LUN 0 TRY 3 BYTES 0");
+  ExpectTextAt(Width*7/100,DiagnosticY+12*DiagnosticScale,DiagnosticScale,"OCS 00 SCSI 02 SENSE 06 29 00 LEN 18");
   if(Argc==2){
     assert(PianoProductBootLogStage("PAYLOAD",EFI_SUCCESS,18)==EFI_SUCCESS);
     assert(PianoProductBootLogStage("INPUT",EFI_SUCCESS,426)==EFI_SUCCESS);
     assert(PianoProductBootLogStage("UFS CAPACITY",EFI_DEVICE_ERROR,528)==EFI_SUCCESS);
     assert(PianoProductBootLogStage("USB",EFI_SUCCESS,1132)==EFI_SUCCESS);
     assert(PianoProductBootLogStage("MENU",EFI_NOT_STARTED,1140)==EFI_SUCCESS);Preview(Argv[1]);
-    assert(PianoProductBootLogMessage(L"未能启动系统",L"存储驱动未能安全退出",EFI_NOT_FOUND,TRUE)==EFI_SUCCESS);
+    assert(PianoProductBootLogStage("UFS CAPACITY",EFI_DEVICE_ERROR,528)==EFI_SUCCESS);
+    assert(PianoProductBootLogMessage(L"未能启动系统",L"存储初始化失败",EFI_DEVICE_ERROR,TRUE)==EFI_SUCCESS);
+    assert(PianoProductBootLogDiagnostic("REPORT LUNS LUN 0 TRY 3 BYTES 0",
+      "OCS 00 SCSI 02 SENSE 06 29 00 LEN 18")==EFI_SUCCESS);
     char Failure[1024];snprintf(Failure,sizeof(Failure),"%s-failure.ppm",Argv[1]);Preview(Failure);
   }
   CONST UINT32 Sizes[][2]={{480,320},{800,600},{3200,320},{480,2136}};

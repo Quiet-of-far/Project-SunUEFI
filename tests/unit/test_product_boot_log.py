@@ -1,6 +1,7 @@
 """Execute the actual native product boot log renderer, no device operations."""
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -27,7 +28,8 @@ class ProductBootLogTests(unittest.TestCase):
                 capture_output=True, text=True, env={**os.environ, 'ASAN_OPTIONS': 'detect_leaks=1'})
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             print(run.stdout.strip())
-        subprocess.run([str(ROOT / 'build/host-tools/usr/bin/clang'),
+        compiler = shutil.which('clang') or str(ROOT / 'build/host-tools/usr/bin/clang')
+        subprocess.run([compiler,
             '--target=aarch64-windows-msvc', '-ffreestanding', '-fshort-wchar',
             '-fsyntax-only', '-Wall', '-Wextra', '-Werror', '-I' + str(INC),
             '-I' + str(INC / 'AArch64'),'-I'+str(generated),str(SOURCE)], check=True)

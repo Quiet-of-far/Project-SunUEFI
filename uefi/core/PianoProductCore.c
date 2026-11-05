@@ -34,6 +34,7 @@ VOID PianoProbeUfs(CONST VOID *Fdt);
 VOID PianoUfsSetProbeAction(EFI_STATUS (*Action)(CONST VOID *));
 EFI_STATUS PianoUfsReadOnlyDmaExperiment(CONST VOID *Fdt);
 CONST CHAR8 *PianoUfsStartupStage(VOID);
+CONST CHAR8 *PianoUfsStartupDiagnostic(UINTN Line);
 EFI_STATUS PianoStartKeys(CONST VOID *Fdt);
 STATIC PIANO_PRODUCT_OWNERS mOwners;
 STATIC PIANO_LATE_HANDOFF mLateHandoff;
@@ -178,6 +179,8 @@ STATIC VOID FailStop(EFI_STATUS Status) {
     else if(!AsciiStrCmp(mBootLogStage,"INPUT"))Detail=L"输入初始化失败";
     else if(!AsciiStrCmp(mBootLogStage,"PAYLOAD"))Detail=L"引导文件不可用";
     if(BootLogAlive())(VOID)PianoProductBootLogMessage(L"未能启动系统",Detail,Status,TRUE);
+    if(BootLogAlive() && (!AsciiStrCmp(mBootLogStage,"UFS CAPACITY") || !AsciiStrCmp(mBootLogStage,"UFS POWER")))
+      (VOID)PianoProductBootLogDiagnostic(PianoUfsStartupDiagnostic(0),PianoUfsStartupDiagnostic(1));
     DEBUG((DEBUG_ERROR,"PIANO_START_FAILED stage=%a status=%r recovery=hold-power-reboot-volume-up-Android\n",mBootLogStage,Status));
   }
 #ifdef __aarch64__

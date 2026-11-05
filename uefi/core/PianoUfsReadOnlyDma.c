@@ -84,6 +84,7 @@ STATIC EFI_STATUS mWindowTransportStatus=EFI_NOT_STARTED;
 #include <Library/IoLib.h>
 #include <Library/DebugLib.h>
 #include <Library/MemoryAllocationLib.h>
+#include <Library/PrintLib.h>
 #ifdef PIANO_UFS_BLOCKIO
 #include "PianoReadOnlyBlock.h"
 #include "PianoUfsShutdown.h"
@@ -116,6 +117,11 @@ STATIC EFI_STATUS mTests[8],mWriteTests[8];
 STATIC UINTN mLunCount;
 STATIC CONST CHAR8 *mStartupStage="UFS";
 CONST CHAR8 *PianoUfsStartupStage(VOID){return mStartupStage;}
+STATIC CHAR8 mStartupDiagnostic[2][80];
+STATIC UINTN mReadAttempts;
+CONST CHAR8 *PianoUfsStartupDiagnostic(UINTN Line){
+  return Line<2?mStartupDiagnostic[Line]:"";
+}
 STATIC UINT32 mSavedBase,mSavedUpper,mSavedRun,mSavedTaskRun,mSavedInterrupt;
 STATIC BOOLEAN mInstalled;
 STATIC BOOLEAN mEverInstalled;
@@ -397,12 +403,10 @@ STATIC EFI_STATUS Submit(CONST CHAR8 *Name,UINT8 Tag,BOOLEAN Nop) {
     R[32+6],R[32+7],R[32+0x10],R[32+0x11],R[32+0x18],R[32+0x19]));
   return EFI_SUCCESS;
 }
-STATIC EFI_STATUS QueryDescriptor(UINT8 Tag,UINT16 Bytes) {
-  EFI_STATUS Status=PianoUfsBuildReadDescriptor(mTrl.Cpu,mTrl.Bytes,mUcd.Cpu,mUcd.Bytes,mUcd.DeviceAddress,Tag,0,0,Bytes);
-  return EFI_ERROR(Status)?Status:Submit("QUERY_READ_DEVICE_DESCRIPTOR",Tag,FALSE);
-}
 STATIC EFI_STATUS ReadScsi(CONST CHAR8 *Name,UINT8 Tag,UINT8 Lun,PIANO_UFS_READ_COMMAND Command,UINT32 Lba,UINT32 Bytes) {
+  mReadAttempts=0;
   for(UINTN Attempt=0;Attempt<3;++Attempt) {
+    mReadAttempts=Attempt+1;
     ZeroMem(mData.Cpu,mData.Bytes);
     EFI_STATUS Status=PianoUfsBuildReadCommand(mTrl.Cpu,mTrl.Bytes,mUcd.Cpu,mUcd.Bytes,mUcd.DeviceAddress,
       mData.DeviceAddress,Bytes,Tag,Lun,Command,Lba,Command==PianoUfsReadLba10?1:0);
@@ -417,28 +421,75 @@ STATIC EFI_STATUS ReadScsi(CONST CHAR8 *Name,UINT8 Tag,UINT8 Lun,PIANO_UFS_READ_
   }
   return EFI_DEVICE_ERROR;
 }
+STATIC EFI_STATUS CapacityFailure(EFI_STATUS Status,CONST CHAR8 *Command,UINT8 Lun,BOOLEAN Response) {
+  if(!EFI_ERROR(Status))return Status;
+  AsciiSPrint(mStartupDiagnostic[0],sizeof(mStartupDiagnostic[0]),
+    "%a LUN %u TRY %u BYTES %u",Command,(UINT32)Lun,(UINT32)mReadAttempts,mTransferred);
+  if(Response) {
+    CONST UINT8 *R=(CONST UINT8 *)mUcd.Cpu+PIANO_UFS_RESPONSE_OFFSET;
+    UINT32 Length=((UINT32)R[32]<<8)|R[33],Format=R[34]&0x7F;
+    UINT32 Key=0,Asc=0,Ascq=0;
+    if((Format==0x70 || Format==0x71) && Length>=14){Key=R[36]&15;Asc=R[46];Ascq=R[47];}
+    else if((Format==0x72 || Format==0x73) && Length>=8){Key=R[35]&15;Asc=R[36];Ascq=R[37];}
+    AsciiSPrint(mStartupDiagnostic[1],sizeof(mStartupDiagnostic[1]),
+      "OCS %02x SCSI %02x SENSE %02x %02x %02x LEN %u",
+      EngineLe32((CONST UINT8 *)mTrl.Cpu+8)&0xFF,(UINT32)R[7],Key,Asc,Ascq,Length);
+  }else mStartupDiagnostic[1][0]=0;
+  DEBUG((DEBUG_ERROR,"SUNUEFI_UFS_CAPACITY_FAILURE status=%r detail=%a response=%a\n",
+    Status,mStartupDiagnostic[0],mStartupDiagnostic[1]));
+  return Status;
+}
+STATIC EFI_STATUS EnsureDeviceActive(VOID) {
+  mStartupDiagnostic[0][0]=mStartupDiagnostic[1][0]=0;mReadAttempts=0;mTransferred=0;
+  EFI_STATUS Status=PianoUfsBuildReadPowerMode(mTrl.Cpu,mTrl.Bytes,mUcd.Cpu,mUcd.Bytes,mUcd.DeviceAddress,6);
+  if(!EFI_ERROR(Status))Status=Submit("QUERY_READ_CURRENT_POWER_MODE",6,FALSE);
+  if(EFI_ERROR(Status))return CapacityFailure(Status,"READ POWER MODE",0xD0,FALSE);
+  if(mPowerMode==0x11)return EFI_SUCCESS;
+  if(mPowerMode!=0x22 && mPowerMode!=0x33)
+    return CapacityFailure(EFI_NOT_READY,"INVALID POWER MODE",0xD0,FALSE);
+  // Query descriptors may work while SCSI reports NOT READY / 04 / 02.
+  // Wake the device WLUN before any ordinary LUN enumeration, even when
+  // descriptors succeeded. This command has no PRDT and transfers no blocks.
+  for(UINT8 Attempt=0;Attempt<3;++Attempt) {
+    UINT8 Tag=7+Attempt;mReadAttempts=Attempt+1;
+    Status=PianoUfsBuildResumeActive(mTrl.Cpu,mTrl.Bytes,mUcd.Cpu,mUcd.Bytes,mUcd.DeviceAddress,Tag);
+    if(!EFI_ERROR(Status))Status=Submit("RESUME_DEVICE_ACTIVE_NO_DATA",Tag,FALSE);
+    if(Status!=EFI_DEVICE_ERROR || !PianoUfsReadRetryable(mTrl.Cpu,mUcd.Cpu,Tag,0xD0,0) || Attempt==2)break;
+    gBS->Stall(10000);
+  }
+  DEBUG((DEBUG_WARN,"SUNUEFI_UFS_RESUME_ACTIVE_RESULT %r physical_ufs_writes=0\n",Status));
+  if(EFI_ERROR(Status))return CapacityFailure(Status,"RESUME ACTIVE",0xD0,TRUE);
+  Status=PianoUfsBuildReadPowerMode(mTrl.Cpu,mTrl.Bytes,mUcd.Cpu,mUcd.Bytes,mUcd.DeviceAddress,11);
+  if(!EFI_ERROR(Status))Status=Submit("QUERY_READ_CURRENT_POWER_MODE",11,FALSE);
+  if(!EFI_ERROR(Status) && mPowerMode!=0x11)Status=EFI_NOT_READY;
+  return CapacityFailure(Status,"VERIFY ACTIVE",0xD0,FALSE);
+}
 STATIC EFI_STATUS ReadLunCapacity(VOID) {
+  mStartupDiagnostic[0][0]=mStartupDiagnostic[1][0]=0;mReadAttempts=0;mTransferred=0;
   EFI_STATUS Status=PianoDmaAllocate(&mDevice,4096,4096,32,
 #if defined(PIANO_UFS_WRITE_TEST) || defined(PIANO_UFS_BOUNDED_VOLUME) || PIANO_UFS_PRODUCT_STORAGE
     PianoDmaBidirectional,
 #else
     PianoDmaFromDevice,
 #endif
-    &mData);if(EFI_ERROR(Status))return Status;
-  Status=PianoDmaMap(&mData);if(EFI_ERROR(Status))return Status;
+    &mData);if(EFI_ERROR(Status))return CapacityFailure(Status,"DMA ALLOC",0,FALSE);
+  Status=PianoDmaMap(&mData);if(EFI_ERROR(Status))return CapacityFailure(Status,"DMA MAP",0,FALSE);
   Status=ReadScsi("REPORT_LUNS",10,0,PianoUfsReportLuns,0,4096);
-  DEBUG((DEBUG_WARN,"SUNUEFI_UFS_REPORT_LUNS_RESULT %r transferred=%u\n",Status,mTransferred));if(EFI_ERROR(Status))return Status;
+  DEBUG((DEBUG_WARN,"SUNUEFI_UFS_REPORT_LUNS_RESULT %r transferred=%u\n",Status,mTransferred));
+  if(EFI_ERROR(Status))return CapacityFailure(Status,"REPORT LUNS",0,TRUE);
   UINT8 Luns[8];UINTN Count;
-  Status=PianoUfsParseLuns(mData.Cpu,mTransferred,Luns,&Count);if(EFI_ERROR(Status))return Status;
+  Status=PianoUfsParseLuns(mData.Cpu,mTransferred,Luns,&Count);
+  if(EFI_ERROR(Status))return CapacityFailure(Status,"PARSE LUNS",0,TRUE);
   mLunCount=Count;
   DEBUG((DEBUG_WARN,"SUNUEFI_UFS_LUN_COUNT count=%u\n",(UINT32)Count));
   for(UINTN I=0;I<Count;++I) {
     UINT64 Last;UINT32 Block;
     Status=ReadScsi("READ_CAPACITY_16",20+I,Luns[I],PianoUfsReadCapacity16,0,32);
-    if(!EFI_ERROR(Status))Status=PianoUfsParseCapacity(mData.Cpu,mTransferred,&Last,&Block);
+    if(EFI_ERROR(Status))return CapacityFailure(Status,"READ CAP16",Luns[I],TRUE);
+    Status=PianoUfsParseCapacity(mData.Cpu,mTransferred,&Last,&Block);
     DEBUG((DEBUG_WARN,"SUNUEFI_UFS_CAPACITY lun=%u status=%r last_lba=%lx block_bytes=%u\n",Luns[I],Status,
       EFI_ERROR(Status)?0:Last,EFI_ERROR(Status)?0:Block));
-    if(EFI_ERROR(Status))return Status;
+    if(EFI_ERROR(Status))return CapacityFailure(Status,"PARSE CAP16",Luns[I],TRUE);
     mLuns[I].Id=Luns[I];mLuns[I].Last=Last;mLuns[I].Block=Block;
   }
   return EFI_SUCCESS;
@@ -1069,6 +1120,8 @@ EFI_STATUS PianoUfsReadOnlyDmaExperiment(CONST VOID *Fdt) {
   Status=PianoUfsBuildNop(mTrl.Cpu,mTrl.Bytes,mUcd.Cpu,mUcd.Bytes,mUcd.DeviceAddress,1);
   if(!EFI_ERROR(Status))Status=Submit("NOP",1,TRUE);
   DEBUG((DEBUG_WARN,"SUNUEFI_UFS_NOP_RESULT %r\n",Status));if(EFI_ERROR(Status))goto Exit;
+  mStartupStage="UFS POWER";Status=EnsureDeviceActive();
+  if(EFI_ERROR(Status))goto Exit;
   // Like the kernel's descriptor query path, allow three bounded read retries.
   // Never retry a timed-out or malformed transport, only a completed general
   // query failure. Each retry uses a fresh tag and cleaned command buffers.
@@ -1089,24 +1142,6 @@ EFI_STATUS PianoUfsReadOnlyDmaExperiment(CONST VOID *Fdt) {
     Status=PianoUfsBuildReadDescriptor(mTrl.Cpu,mTrl.Bytes,mUcd.Cpu,mUcd.Bytes,mUcd.DeviceAddress,5,0,0,DescriptorBytes);
     if(!EFI_ERROR(Status))Status=Submit("QUERY_READ_FULL_DEVICE_DESCRIPTOR",5,FALSE);
     DEBUG((DEBUG_WARN,"SUNUEFI_UFS_QUERY_FULL_RESULT %r\n",Status));
-  }
-  if(Status==EFI_DEVICE_ERROR) {
-    EFI_STATUS Diagnostic=PianoUfsBuildReadPowerMode(mTrl.Cpu,mTrl.Bytes,mUcd.Cpu,mUcd.Bytes,mUcd.DeviceAddress,6);
-    if(!EFI_ERROR(Diagnostic))Diagnostic=Submit("QUERY_READ_CURRENT_POWER_MODE",6,FALSE);
-    DEBUG((DEBUG_WARN,"SUNUEFI_UFS_POWER_DIAGNOSTIC %r descriptor_stage_failed=1\n",Diagnostic));
-    if(!EFI_ERROR(Diagnostic) && (mPowerMode==0x22 || mPowerMode==0x33)) {
-      Status=PianoUfsBuildResumeActive(mTrl.Cpu,mTrl.Bytes,mUcd.Cpu,mUcd.Bytes,mUcd.DeviceAddress,7);
-      if(!EFI_ERROR(Status))Status=Submit("RESUME_DEVICE_ACTIVE_NO_DATA",7,FALSE);
-      DEBUG((DEBUG_WARN,"SUNUEFI_UFS_RESUME_ACTIVE_RESULT %r physical_ufs_writes=0\n",Status));
-      if(!EFI_ERROR(Status)) {
-        Status=PianoUfsBuildReadPowerMode(mTrl.Cpu,mTrl.Bytes,mUcd.Cpu,mUcd.Bytes,mUcd.DeviceAddress,8);
-        if(!EFI_ERROR(Status))Status=Submit("QUERY_READ_CURRENT_POWER_MODE",8,FALSE);
-        if(!EFI_ERROR(Status) && mPowerMode!=0x11 && mPowerMode!=0)Status=EFI_NOT_READY;
-      }
-      if(!EFI_ERROR(Status))Status=QueryDescriptor(9,2);
-      if(!EFI_ERROR(Status))Status=QueryDescriptor(10,((UINT8 *)mUcd.Cpu)[PIANO_UFS_RESPONSE_OFFSET+32]);
-      DEBUG((DEBUG_WARN,"SUNUEFI_UFS_QUERY_AFTER_RESUME %r\n",Status));
-    }
   }
   if(!EFI_ERROR(Status)){mStartupStage="UFS CAPACITY";Status=ReadLunCapacity();}
   if(!EFI_ERROR(Status)){mStartupStage="UFS GPT";Status=ReadGpts();}

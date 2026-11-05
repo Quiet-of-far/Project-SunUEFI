@@ -17,6 +17,8 @@ EFI_STATUS PianoProductBootLogStage(CONST CHAR8 *Name,EFI_STATUS Status,
 // Human-readable boot/exit progress and recovery instructions through the same GOP.
 EFI_STATUS PianoProductBootLogMessage(CONST CHAR16 *Title,CONST CHAR16 *Detail,
                                      EFI_STATUS Status,BOOLEAN Failed);
+// Append two compact diagnostic lines below the recovery message.
+EFI_STATUS PianoProductBootLogDiagnostic(CONST CHAR8 *First,CONST CHAR8 *Second);
 // Explicit diagnostic builds only: draw through the same GOP used by the
 // product boot log. No mode change, hardware write or protocol replacement.
 EFI_STATUS PianoProductDisplayCheckpoint(CONST CHAR8 *Name,UINT32 Stage);
