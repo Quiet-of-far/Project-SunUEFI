@@ -51,6 +51,8 @@ jobs:
           fetch-depth: 0
           submodules: false
           persist-credentials: false
+      - name: Check product configuration
+        run: ./build.sh check
       - id: targets
         env:
           PUSH_BEFORE: ${{ github.event.before }}
@@ -129,6 +131,44 @@ jobs:
                   ;;
               esac
             ' 2>&1 | tee build/logs/ci-build.log
+      - name: Verify public image identity
+        if: matrix.target == 'arch-niri'
+        run: |
+          sudo python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          output = Path('build/distros/arch-niri-piano')
+          manifest = json.loads((output / 'manifest.json').read_text())
+          if manifest.get('debug_access'):
+              raise SystemExit('Public images must not contain personal debug access')
+          root = output / 'rootfs'
+          for directory in ('home', 'root', 'etc/ssh'):
+              for path in (root / directory).rglob('*'):
+                  if path.is_file() and (path.name == 'authorized_keys' or
+                                         path.name.startswith('ssh_host_')):
+                      raise SystemExit('Public images must not contain SSH identity files')
+          connections = root / 'etc/NetworkManager/system-connections'
+          if connections.exists() and any(connections.iterdir()):
+              raise SystemExit('Public images must not contain saved network connections')
+          print('Public image contains no personal debug access, SSH identity or saved connections.')
+          PY
+      - name: Prepare kernel download
+        if: matrix.target == 'linux' || matrix.target == 'arch-niri'
+        run: |
+          mkdir -p artifacts/downloads/kernel
+          sudo tar -C artifacts/kernels/release -cJf artifacts/downloads/kernel/kernel.tar.xz \
+            Image System.map config manifest.json modules
+          sha256sum artifacts/downloads/kernel/kernel.tar.xz > artifacts/downloads/kernel/SHA256SUMS
+      - name: Kernel and matching modules
+        if: matrix.target == 'linux' || matrix.target == 'arch-niri'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: SunUEFI-Kernel
+          path: artifacts/downloads/kernel/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
       - name: Show failed build output
         if: failure()
         run: |
