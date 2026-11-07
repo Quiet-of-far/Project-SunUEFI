@@ -403,6 +403,53 @@ STATIC EFI_STATUS Submit(CONST CHAR8 *Name,UINT8 Tag,BOOLEAN Nop) {
     R[32+6],R[32+7],R[32+0x10],R[32+0x11],R[32+0x18],R[32+0x19]));
   return EFI_SUCCESS;
 }
+STATIC EFI_STATUS CapacityFailure(EFI_STATUS Status,CONST CHAR8 *Command,UINT8 Lun,BOOLEAN Response);
+STATIC EFI_STATUS ReadStablePowerMode(UINT8 *Tag) {
+  for(UINTN Attempt=0;Attempt<3;++Attempt){
+    mPowerMode=MAX_UINT32;
+    UINT8 Current=(*Tag)++;
+    EFI_STATUS Status=PianoUfsBuildReadPowerMode(mTrl.Cpu,mTrl.Bytes,mUcd.Cpu,mUcd.Bytes,mUcd.DeviceAddress,Current);
+    if(!EFI_ERROR(Status))Status=Submit("QUERY_READ_CURRENT_POWER_MODE",Current,FALSE);
+    if(EFI_ERROR(Status))return Status;
+    // Pre-Active/Pre-Sleep/Pre-PowerDown are observations, not permission to
+    // issue another transition. Wait a bounded time for a stable state.
+    if(mPowerMode!=0x10 && mPowerMode!=0x20 && mPowerMode!=0x30)return EFI_SUCCESS;
+    if(Attempt<2)gBS->Stall(10000);
+  }
+  return EFI_NOT_READY;
+}
+STATIC EFI_STATUS EnsureDeviceActive(VOID) {
+  mStartupDiagnostic[0][0]=mStartupDiagnostic[1][0]=0;mReadAttempts=0;mTransferred=0;
+  UINT8 Tag=6;
+  EFI_STATUS Status=ReadStablePowerMode(&Tag);
+  if(EFI_ERROR(Status))return CapacityFailure(Status,"READ POWER MODE",0xD0,FALSE);
+  if(mPowerMode==0 || mPowerMode==0x11)return EFI_SUCCESS;
+  if(mPowerMode!=0x22 && mPowerMode!=0x33)return CapacityFailure(EFI_NOT_READY,"INVALID POWER MODE",0xD0,FALSE);
+  // Only a proven Sleep/PowerDown state permits this existing no-data Active
+  // command. It changes device power, never a logical unit's blocks.
+  for(UINTN Attempt=0;Attempt<3;++Attempt){
+    mReadAttempts=Attempt+1;
+    UINT8 Current=Tag++;
+    Status=PianoUfsBuildResumeActive(mTrl.Cpu,mTrl.Bytes,mUcd.Cpu,mUcd.Bytes,mUcd.DeviceAddress,Current);
+    if(!EFI_ERROR(Status))Status=Submit("RESUME_DEVICE_ACTIVE_NO_DATA",Current,FALSE);
+    if(!EFI_ERROR(Status)){
+      CONST UINT8 *R=(UINT8 *)mUcd.Cpu+PIANO_UFS_RESPONSE_OFFSET;
+      if(R[2]!=0xD0 || (R[1]&0x60) || EngineBe32(R+12) ||
+         R[10] || R[11] || R[32] || R[33] || mTransferred)Status=EFI_DEVICE_ERROR;
+    }
+    if(!EFI_ERROR(Status))break;
+    UINT8 Key,Asc,Ascq;
+    if(Status!=EFI_DEVICE_ERROR || Attempt==2 ||
+       !PianoUfsReadSense(mUcd.Cpu,&Key,&Asc,&Ascq) || Key!=6 ||
+       !PianoUfsReadRetryable(mTrl.Cpu,mUcd.Cpu,Current,0xD0,0))return CapacityFailure(Status,"RESUME ACTIVE",0xD0,TRUE);
+    gBS->Stall(10000);
+  }
+  if(EFI_ERROR(Status))return Status;
+  // Submit proves quiescence and completes UCD/UTRD before this next query.
+  Status=ReadStablePowerMode(&Tag);
+  if(!EFI_ERROR(Status) && mPowerMode!=0 && mPowerMode!=0x11)Status=EFI_NOT_READY;
+  return CapacityFailure(Status,"VERIFY ACTIVE",0xD0,FALSE);
+}
 STATIC EFI_STATUS ReadScsi(CONST CHAR8 *Name,UINT8 Tag,UINT8 Lun,PIANO_UFS_READ_COMMAND Command,UINT32 Lba,UINT32 Bytes) {
   mReadAttempts=0;
   for(UINTN Attempt=0;Attempt<3;++Attempt) {
@@ -438,31 +485,6 @@ STATIC EFI_STATUS CapacityFailure(EFI_STATUS Status,CONST CHAR8 *Command,UINT8 L
   DEBUG((DEBUG_ERROR,"SUNUEFI_UFS_CAPACITY_FAILURE status=%r detail=%a response=%a\n",
     Status,mStartupDiagnostic[0],mStartupDiagnostic[1]));
   return Status;
-}
-STATIC EFI_STATUS EnsureDeviceActive(VOID) {
-  mStartupDiagnostic[0][0]=mStartupDiagnostic[1][0]=0;mReadAttempts=0;mTransferred=0;
-  EFI_STATUS Status=PianoUfsBuildReadPowerMode(mTrl.Cpu,mTrl.Bytes,mUcd.Cpu,mUcd.Bytes,mUcd.DeviceAddress,6);
-  if(!EFI_ERROR(Status))Status=Submit("QUERY_READ_CURRENT_POWER_MODE",6,FALSE);
-  if(EFI_ERROR(Status))return CapacityFailure(Status,"READ POWER MODE",0xD0,FALSE);
-  if(mPowerMode==0x11)return EFI_SUCCESS;
-  if(mPowerMode!=0x22 && mPowerMode!=0x33)
-    return CapacityFailure(EFI_NOT_READY,"INVALID POWER MODE",0xD0,FALSE);
-  // Query descriptors may work while SCSI reports NOT READY / 04 / 02.
-  // Wake the device WLUN before any ordinary LUN enumeration, even when
-  // descriptors succeeded. This command has no PRDT and transfers no blocks.
-  for(UINT8 Attempt=0;Attempt<3;++Attempt) {
-    UINT8 Tag=7+Attempt;mReadAttempts=Attempt+1;
-    Status=PianoUfsBuildResumeActive(mTrl.Cpu,mTrl.Bytes,mUcd.Cpu,mUcd.Bytes,mUcd.DeviceAddress,Tag);
-    if(!EFI_ERROR(Status))Status=Submit("RESUME_DEVICE_ACTIVE_NO_DATA",Tag,FALSE);
-    if(Status!=EFI_DEVICE_ERROR || !PianoUfsReadRetryable(mTrl.Cpu,mUcd.Cpu,Tag,0xD0,0) || Attempt==2)break;
-    gBS->Stall(10000);
-  }
-  DEBUG((DEBUG_WARN,"SUNUEFI_UFS_RESUME_ACTIVE_RESULT %r physical_ufs_writes=0\n",Status));
-  if(EFI_ERROR(Status))return CapacityFailure(Status,"RESUME ACTIVE",0xD0,TRUE);
-  Status=PianoUfsBuildReadPowerMode(mTrl.Cpu,mTrl.Bytes,mUcd.Cpu,mUcd.Bytes,mUcd.DeviceAddress,11);
-  if(!EFI_ERROR(Status))Status=Submit("QUERY_READ_CURRENT_POWER_MODE",11,FALSE);
-  if(!EFI_ERROR(Status) && mPowerMode!=0x11)Status=EFI_NOT_READY;
-  return CapacityFailure(Status,"VERIFY ACTIVE",0xD0,FALSE);
 }
 STATIC EFI_STATUS ReadLunCapacity(VOID) {
   mStartupDiagnostic[0][0]=mStartupDiagnostic[1][0]=0;mReadAttempts=0;mTransferred=0;
@@ -1120,6 +1142,8 @@ EFI_STATUS PianoUfsReadOnlyDmaExperiment(CONST VOID *Fdt) {
   Status=PianoUfsBuildNop(mTrl.Cpu,mTrl.Bytes,mUcd.Cpu,mUcd.Bytes,mUcd.DeviceAddress,1);
   if(!EFI_ERROR(Status))Status=Submit("NOP",1,TRUE);
   DEBUG((DEBUG_WARN,"SUNUEFI_UFS_NOP_RESULT %r\n",Status));if(EFI_ERROR(Status))goto Exit;
+  // Descriptors may respond even while asleep. Check the mandatory power
+  // attribute before descriptor and SCSI access, not only after query errors.
   mStartupStage="UFS POWER";Status=EnsureDeviceActive();
   if(EFI_ERROR(Status))goto Exit;
   // Like the kernel's descriptor query path, allow three bounded read retries.
