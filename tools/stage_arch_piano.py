@@ -14,7 +14,7 @@ import sys
 
 import build_piano_runtime_helpers as runtime
 from rootfs import common as release
-from rootfs.arch import guest_environment
+from rootfs.arch import guest_environment, protect_mesa_packages
 import stage_piano_full_userspace as userspace
 import stage_piano_kernel_modules as modules
 import stage_piano_ram_hardware as hardware
@@ -91,6 +91,7 @@ def stage(args):
     put(root, 'etc/piano/linux-debug.conf', 'usb=acm-ncm\nshell=1\nrecovery_seconds=0\n')
     put(root, 'etc/chromium-flags.conf',
         (ROOT / 'linux/bsp/arch/chromium-flags.conf').read_text())
+    protect_mesa_packages(root)
     from assemble_rootfs import configure_desktop
     configure_desktop(root, {
         'desktop': 'niri', 'distro': 'arch', 'scale_percent': 200,

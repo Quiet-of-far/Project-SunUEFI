@@ -13,6 +13,36 @@ from rootfs.common import digest
 
 ROOT = Path(__file__).resolve().parents[2]
 
+
+def protect_mesa_packages(root):
+    """Keep repository upgrades from replacing the board's patched GPU drivers."""
+    path = root / 'etc/pacman.conf'
+    if path.is_symlink():
+        raise ValueError('Refuse a symlink for the guest pacman configuration')
+    original = path.read_text()
+    rows = original.splitlines(keepends=True)
+    section = None
+    options = None
+    ignored = set()
+    for index, line in enumerate(rows):
+        text = line.strip()
+        if text.startswith('[') and text.endswith(']'):
+            section = text[1:-1]
+            if section == 'options':
+                if options is not None:
+                    raise ValueError('Duplicate pacman options section')
+                options = index
+        elif section == 'options' and re.match(r'^IgnorePkg\s*=', text):
+            ignored.update(text.split('=', 1)[1].split())
+    if options is None:
+        raise ValueError('Pacman options section is missing')
+    missing = [name for name in ('mesa', 'vulkan-freedreno') if name not in ignored]
+    if missing:
+        rows.insert(options + 1,
+                    '# Preserve the Piano Adreno 830v1 driver until its patched replacement is available.\n'
+                    'IgnorePkg = ' + ' '.join(missing) + '\n')
+        path.write_text(''.join(rows))
+
 def run(args, **kwargs):
     return subprocess.run(list(map(str, args)), check=True, **kwargs)
 

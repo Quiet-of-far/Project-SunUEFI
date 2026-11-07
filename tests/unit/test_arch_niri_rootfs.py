@@ -77,6 +77,23 @@ class ArchNiriTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn('Unknown command', result.stderr)
 
+    def test_mesa_upgrade_protection_preserves_other_pacman_configuration(self):
+        root = Path(self.temp.name)
+        (root / 'etc').mkdir()
+        path = root / 'etc/pacman.conf'
+        original = ('[options]\nIgnorePkg = custom-kernel mesa\n'
+                    'SigLevel = Required DatabaseOptional\n'
+                    '[core]\nInclude = /etc/pacman.d/mirrorlist\n')
+        path.write_text(original)
+        arch.protect_mesa_packages(root)
+        protected = path.read_text()
+        self.assertIn('IgnorePkg = custom-kernel mesa\n', protected)
+        self.assertIn('IgnorePkg = vulkan-freedreno\n', protected)
+        self.assertIn('[core]\nInclude = /etc/pacman.d/mirrorlist\n', protected)
+        self.assertIn('SigLevel = Required DatabaseOptional\n', protected)
+        arch.protect_mesa_packages(root)
+        self.assertEqual(path.read_text(), protected)
+
 
 if __name__ == '__main__':
     unittest.main()
