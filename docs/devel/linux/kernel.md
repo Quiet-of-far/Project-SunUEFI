@@ -154,6 +154,30 @@ Linux 的电池充电电流从 38°C 以上每升高 1°C 下调 300 mA，普通
 UCSI 连接状态，不能只看电池的 `Charging` / `Discharging`。使用中的现象和
 处理办法见[电源和睡眠](../../user/known-issues.md#电源和睡眠)。
 
+0029 在现有 `piano-mca-usb` 电源设备上提供标准
+`charge_control_end_threshold` 属性。范围为 50–100，默认 100 表示沿用正常
+充电策略；设置为 80 时，任一电池计量器达到 80% 后停止电池充电，两个计量器
+都降至 75% 或以下才恢复。恢复回差固定为 5 个百分点，没有独立恢复阈值或
+手动停充属性。设置仅在本次驱动加载期间保留。
+
+停充使用原厂 `qcom_subpmic_enable_charging()` 的 MCA 属性 `0x2003`，参数是
+单字节布尔值，不使用会暂停外部输入的 `0x2019`。停充前关闭 SC8541，并读取
+实际 `CHG_EN` 状态确认停机，失败则保留引用重试；输入供电策略仍运行，但不
+重新启动电荷泵。电量读取失败时保守停充，ADSP 重启或重新插入电源后重新应用
+策略，通信失败不会被记为成功。
+
+限充由 AP 定时检查，不能依靠普通工作队列在系统休眠期间执行。因此设置了
+低于 100 的上限时，驱动在系统休眠前先停止充电，唤醒后重新判断；无法确认
+停充时拒绝本次休眠。没有新增唤醒定时器。该接口限制充电，不承诺物理隔离
+电池或保证瞬时电池电流为零。
+
+例如以 root 设置和读取上限：
+
+```sh
+echo 80 > /sys/class/power_supply/piano-mca-usb/charge_control_end_threshold
+cat /sys/class/power_supply/piano-mca-usb/charge_control_end_threshold
+```
+
 ADSP 初始化加载标准 `pmic_glink_altmode` 和 `ucsi_glink`，MCA 只处理
 小米充电协议，其 `pan_ack` 关闭，避免两个驱动重复确认同一组通知。
 现有 USB 网络服务由 Type-C 端口的标准 udev 就绪状态启动：方向有效且数据角色
