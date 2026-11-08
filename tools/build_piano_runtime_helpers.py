@@ -22,8 +22,9 @@ ROOT=Path(__file__).resolve().parents[1]
 PUBLIC_COMMIT='a75f8c5d5fa099d65c171ac839c2e3bb6c63ec45'
 UAPI_COMMIT='352508459733d3e6d349ea5581a8dd2fd8bb4180'
 UAPI_DIGEST='c4c7b7358f4440da8832eea607ff812fb5481181401e869a34cca70bbe103d4c'
-MACROS_COMMIT='993a17dcb672357998a463a73f120064d6c74f4f'
-LOOP_COMMIT='0f9ee86760b7f2bea174b7e3e7a1d38845da0ab4'
+SOURCE_PINS=json.loads((ROOT/'sources.lock.json').read_text())
+MACROS_COMMIT=SOURCE_PINS['audioreach-topology']['commit']
+LOOP_COMMIT=SOURCE_PINS['v4l2loopback']['commit']
 PUBLIC_SOURCES={
  'piano-touch-view':('initramfs/touch-view/piano-touch-view.c','eb1bac5a7bfac3200248ebe39e8d9564bed3d7848b11655ded5d065dc0ef6e12','usr/bin/piano-touch-view'),
  'piano-camerad':('camera/piano-camerad.c','c2ab6391fa41d21d1c3e4359dc0adf671261417dbda180724faf8b2758932d47','usr/lib/piano/piano-camerad'),
@@ -49,6 +50,7 @@ TOUCH_CAPTURE_PATCH=ROOT/'tools/patches/piano-touch-view-raw-capture.patch'
 TOUCH_PEN_PATCH=ROOT/'tools/patches/piano-touch-view-pen-owner.patch'
 TOUCH_EPOCH_PATCH=ROOT/'tools/patches/piano-touch-view-epoch-reset.patch'
 TOUCH_LINE_NOISE_PATCH=ROOT/'tools/patches/piano-touch-view-line-noise.patch'
+TOUCH_PALM_PATCH=ROOT/'tools/patches/piano-touch-view-palm-rejection.patch'
 CAMERAD_CCM_PATCH=ROOT/'tools/patches/piano-camerad-writable-ccm.patch'
 CAMERAD_AE_PATCH=ROOT/'tools/patches/piano-camerad-stable-ae.patch'
 CAMERAD_FRAME_PATCH=ROOT/'tools/patches/piano-camerad-frame-integrity.patch'
@@ -90,8 +92,8 @@ def derive_touch_source(public, output):
     folder=Path(output)/'piano-touch-source';target=folder/relative
     target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(original,target)
     patches=[]
-    for patch in (TOUCH_DIAGNOSTICS_PATCH,TOUCH_CAPTURE_PATCH,TOUCH_PEN_PATCH,TOUCH_EPOCH_PATCH,TOUCH_LINE_NOISE_PATCH):
-        if patch==TOUCH_PEN_PATCH:
+    for patch in (TOUCH_DIAGNOSTICS_PATCH,TOUCH_CAPTURE_PATCH,TOUCH_PEN_PATCH,TOUCH_EPOCH_PATCH,TOUCH_LINE_NOISE_PATCH,TOUCH_PALM_PATCH):
+        if patch in (TOUCH_PEN_PATCH,TOUCH_PALM_PATCH):
             subprocess.run(['patch','--batch','--forward','--fuzz=0',
                             '--no-backup-if-mismatch','-p1','-i',str(patch)],cwd=folder,check=True)
         else:
@@ -320,12 +322,14 @@ def build(args):
     uapi=args.uapi.resolve();uapi_rows=tree_files(uapi/'include')
     if tree_digest(uapi_rows)!=UAPI_DIGEST:raise ValueError('3525 UAPI header generation changed')
     repository(args.macros.resolve(),MACROS_COMMIT);repository(args.v4l2_source.resolve(),LOOP_COMMIT)
-    tools=ROOT/'build/host-tools/usr/bin';env=os.environ.copy();env['PATH']=str(tools)+os.pathsep+env['PATH'];env['LD_LIBRARY_PATH']=str(ROOT/'build/host-tools/usr/lib')
+    toolroot=Path(os.environ.get('SUNUEFI_TOOLCHAIN_ROOT',ROOT/'build/host-tools/usr'))
+    tools=toolroot/'bin';env=os.environ.copy();env['PATH']=str(tools)+os.pathsep+env['PATH'];env['LD_LIBRARY_PATH']=str(toolroot/'lib')
     inputs={str(Path(__file__).resolve()):sha(Path(__file__).resolve())}
     inputs[str(TOUCH_DIAGNOSTICS_PATCH)]=sha(TOUCH_DIAGNOSTICS_PATCH)
     inputs[str(TOUCH_CAPTURE_PATCH)]=sha(TOUCH_CAPTURE_PATCH)
     inputs[str(TOUCH_PEN_PATCH)]=sha(TOUCH_PEN_PATCH)
     inputs[str(TOUCH_EPOCH_PATCH)]=sha(TOUCH_EPOCH_PATCH)
+    inputs[str(TOUCH_PALM_PATCH)]=sha(TOUCH_PALM_PATCH)
     for patch in (CAMERAD_CCM_PATCH,CAMERAD_AE_PATCH,CAMERAD_FRAME_PATCH,CAMERAD_MANUAL_PATCH,CAMERAD_TIMING_PATCH):
         inputs[str(patch)]=sha(patch)
     for name,pin in TOOL_PINS.items():

@@ -41,9 +41,13 @@ STATIC UINTN mKeysCount;
 STATIC volatile BOOLEAN mStartupWindow;
 STATIC BOOLEAN mStartupWindowUsed;
 STATIC PIANO_PRODUCT_RUNTIME_PROTOCOL mRuntime;
+STATIC EFI_STATUS (*mLinuxEntry)(VOID *,PIANO_PRODUCT_RUNTIME_PROTOCOL *,EFI_HANDLE);
+STATIC VOID *mLinuxContext;
 STATIC CONST PIANO_SMMU_RETIRED_USB_PROOF *mStartupUsbProof;
 STATIC CONST VOID *mStartupUsbFdt;
 BOOLEAN PianoSetStandardKeyNavigation(BOOLEAN Enable);
+VOID PianoPogoPump(VOID);
+VOID PianoTouchPump(VOID);
 STATIC EFI_STATUS Exact(EFI_STATUS S){return S==EFI_SUCCESS?S:EFI_ERROR(S)?S:EFI_DEVICE_ERROR;}
 STATIC VOID RetainAndHalt(VOID){mReport.Retained=TRUE;
 #ifdef __aarch64__
@@ -135,15 +139,29 @@ STATIC EFI_STATUS RegisterEsc(UINTN I) {
 STATIC VOID EFIAPI KeysChanged(EFI_EVENT Event,VOID *Context){(VOID)Event;(VOID)Context;mKeysDirty=TRUE;}
 STATIC VOID EFIAPI Ebs(EFI_EVENT Event,VOID *Context){(VOID)Event;(VOID)Context;mStartupWindow=FALSE;mAlive=FALSE;mReport.ServicesLost=TRUE;mReport.IdleKnown=FALSE;}
 STATIC EFI_STATUS RefreshKeys(VOID) {
+  // ConSplitter forwards notifications to its physical inputs. Subscribe to
+  // the standard console once, or use physical providers when it has no Ex.
+  EFI_HANDLE Preferred=NULL;
+  if(gST && gST->ConsoleInHandle) {
+    EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL *Console=NULL;
+    EFI_STATUS S=gBS->HandleProtocol(gST->ConsoleInHandle,&gEfiSimpleTextInputExProtocolGuid,(VOID **)&Console);RequireAlive();
+    if(S==EFI_SUCCESS && Console && Console->RegisterKeyNotify && Console->UnregisterKeyNotify)Preferred=gST->ConsoleInHandle;
+  }
   // Protocol removal does not signal RegisterProtocolNotify. Fresh lookup on
   // every APP slice prevents using a retired or replaced keyboard instance.
   for(UINTN I=0;I<mKeysCount;) {
     EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL *Fresh=NULL;
     EFI_STATUS S=gBS->HandleProtocol(mKeys[I].Handle,&gEfiSimpleTextInputExProtocolGuid,(VOID **)&Fresh);RequireAlive();
     if(S==EFI_SUCCESS && Fresh==mKeys[I].Input && Fresh && Fresh->UnregisterKeyNotify==mKeys[I].Unregister){
-      if(mStartupWindow && !mKeys[I].Notify[1]){S=RegisterEsc(I);if(S!=EFI_SUCCESS)return mReport.KeyStatus=S;}
-      ++I;continue;}
-    if((S==EFI_SUCCESS && (!Fresh || Fresh==mKeys[I].Input)) ||
+      if(!Preferred || mKeys[I].Handle==Preferred) {
+        if(mStartupWindow && !mKeys[I].Notify[1]){S=RegisterEsc(I);if(S!=EFI_SUCCESS)return mReport.KeyStatus=S;}
+        ++I;continue;
+      }
+      for(UINTN J=0;J<4;++J)if(mKeys[I].Notify[J]) {
+        S=Fresh->UnregisterKeyNotify(Fresh,mKeys[I].Notify[J]);RequireAlive();
+        if(S!=EFI_SUCCESS){mReport.Retained=TRUE;return mReport.KeyStatus=Exact(S);}mKeys[I].Notify[J]=NULL;
+      }
+    }else if((S==EFI_SUCCESS && (!Fresh || Fresh==mKeys[I].Input)) ||
        (S!=EFI_SUCCESS && S!=EFI_NOT_FOUND && S!=EFI_UNSUPPORTED && S!=EFI_INVALID_PARAMETER)){
       mReport.Retained=TRUE;return mReport.KeyStatus=S==EFI_SUCCESS?EFI_COMPROMISED_DATA:Exact(S);
     }
@@ -155,7 +173,9 @@ STATIC EFI_STATUS RefreshKeys(VOID) {
   mReport.KeyboardProviders=(UINT32)mKeysCount;
   if(!mKeysDirty)return EFI_SUCCESS;
   mKeysDirty=FALSE;
-  EFI_HANDLE *Handles=NULL;UINTN Count=0;EFI_STATUS S=gBS->LocateHandleBuffer(ByProtocol,&gEfiSimpleTextInputExProtocolGuid,NULL,&Count,&Handles);RequireAlive();
+  EFI_HANDLE *Handles=NULL;UINTN Count=0;EFI_STATUS S=EFI_SUCCESS;
+  if(Preferred){Handles=&Preferred;Count=1;}
+  else {S=gBS->LocateHandleBuffer(ByProtocol,&gEfiSimpleTextInputExProtocolGuid,NULL,&Count,&Handles);RequireAlive();}
   if(S==EFI_NOT_FOUND && !Count && !Handles)return mReport.KeyStatus=EFI_NOT_READY;
   if((Count && !Handles) || (!Count && Handles) || Count>256 || (S!=EFI_SUCCESS && (Count || Handles))){mReport.Retained=TRUE;return mReport.KeyStatus=EFI_COMPROMISED_DATA;}
   if(S!=EFI_SUCCESS)return mReport.KeyStatus=Exact(S);
@@ -178,7 +198,7 @@ STATIC EFI_STATUS RefreshKeys(VOID) {
     mKeys[mKeysCount].Handle=Handles[I];mKeys[mKeysCount].Input=Input;ZeroMem(mKeys[mKeysCount].Notify,sizeof(mKeys[mKeysCount].Notify));mKeys[mKeysCount].Notify[0]=Token;mKeys[mKeysCount].Unregister=Input->UnregisterKeyNotify;++mKeysCount;
     if(mStartupWindow){WindowFailure=RegisterEsc(mKeysCount-1);if(WindowFailure!=EFI_SUCCESS)break;}
   }
-  EFI_STATUS Free=Handles?gBS->FreePool(Handles):EFI_SUCCESS;RequireAlive();if(Free!=EFI_SUCCESS)mReport.Retained=TRUE;
+  EFI_STATUS Free=Handles && !Preferred?gBS->FreePool(Handles):EFI_SUCCESS;RequireAlive();if(Free!=EFI_SUCCESS)mReport.Retained=TRUE;
   mReport.KeyboardProviders=(UINT32)mKeysCount;
   return mReport.KeyStatus=mReport.Retained?EFI_COMPROMISED_DATA:WindowFailure!=EFI_SUCCESS?WindowFailure:mKeysCount?EFI_SUCCESS:EFI_NOT_READY;
 }
@@ -220,6 +240,11 @@ STATIC EFI_STATUS EFIAPI Pump(PIANO_PRODUCT_RUNTIME_PROTOCOL *This,UINT32 Reason
   if(mReport.Retained){mReport.Pumping=FALSE;return EFI_COMPROMISED_DATA;}
   PianoDwc3ServiceReplayStartup();
   PianoRawLinuxReplayStable();
+  // Keyboard and touch do one synchronous transfer per call, so they run only
+  // where the USB role poll runs. Runtime reads take about 0.7 ms (keyboard)
+  // and 2.6 ms (touch); bring-up keeps Linux's transfer sizes and can take
+  // up to about 30 ms per call
+  if(Reason&(PIANO_PRODUCT_PUMP_WAIT_EVENT|PIANO_PRODUCT_PUMP_GUI)){PianoPogoPump();PianoTouchPump();}
   if(mStartupUsbProof){
     S=StartupUsbAbsent();
     if(S==EFI_SUCCESS){
@@ -261,7 +286,22 @@ STATIC EFI_STATUS EFIAPI Pump(PIANO_PRODUCT_RUNTIME_PROTOCOL *This,UINT32 Reason
   }
   mReport.Pumping=FALSE;return mReport.LastPump=Exact(S);
 }
-STATIC PIANO_PRODUCT_RUNTIME_PROTOCOL mRuntime={PIANO_PRODUCT_RUNTIME_REVISION,Pump,Alive,Request,Pending,Ack};
+STATIC EFI_STATUS EFIAPI StartLinux(PIANO_PRODUCT_RUNTIME_PROTOCOL *This,EFI_HANDLE Image) {
+  if(This!=&mRuntime || !Image)return EFI_INVALID_PARAMETER;
+  EFI_STATUS Status=AtApp();if(Status!=EFI_SUCCESS)return Status;
+  if(mReport.Retained || mReport.Pumping || mReport.Dispatching ||
+     mReport.ActiveAction!=PIANO_PRODUCT_ACTION_NONE || mReport.PendingAction!=PIANO_PRODUCT_ACTION_NONE)return EFI_NOT_READY;
+  if(!mLinuxEntry || mReport.RequestedCoreAction!=PianoUsbServiceActionBoot)return EFI_NOT_STARTED;
+  return mLinuxEntry(mLinuxContext,This,Image);
+}
+STATIC PIANO_PRODUCT_RUNTIME_PROTOCOL mRuntime={PIANO_PRODUCT_RUNTIME_REVISION,Pump,Alive,Request,Pending,Ack,StartLinux};
+EFI_STATUS PianoBootPolicySetLinuxEntry(EFI_STATUS (*Start)(VOID *,PIANO_PRODUCT_RUNTIME_PROTOCOL *,EFI_HANDLE),VOID *Context) {
+  if(!Start || !Context)return EFI_INVALID_PARAMETER;
+  if(!mReport.Initialized || !mReport.ProtocolInstalled)return EFI_NOT_READY;
+  EFI_STATUS Status=AtApp();if(Status!=EFI_SUCCESS)return Status;
+  if(mLinuxEntry)return EFI_ALREADY_STARTED;
+  mLinuxEntry=Start;mLinuxContext=Context;return EFI_SUCCESS;
+}
 STATIC EFI_STATUS RetireEsc(VOID) {
   if(mReport.Retained)return EFI_COMPROMISED_DATA;
   for(UINTN I=0;I<mKeysCount;++I){
@@ -494,6 +534,15 @@ EFI_STATUS PianoBootPolicyCancelStable(VOID) {
   if(mReport.Retained||mReport.Pumping||mReport.Dispatching||mReport.ActiveAction!=PIANO_PRODUCT_ACTION_NONE||
      mReport.RequestedCoreAction!=PianoUsbServiceActionBoot||mReport.PendingAction!=PIANO_PRODUCT_ACTION_NONE)return EFI_ACCESS_DENIED;
   mReport.RequestedCoreAction=PianoUsbServiceActionNone;
+  return Request(&mRuntime,PIANO_PRODUCT_ACTION_SIMPLEINIT);
+}
+EFI_STATUS PianoBootPolicyCancelExit(VOID) {
+  EFI_STATUS S=AtApp();if(S!=EFI_SUCCESS)return S;
+  PIANO_USB_SERVICE_ACTION A=mReport.RequestedCoreAction;
+  if(mReport.Retained||mReport.Pumping||mReport.Dispatching||mReport.ActiveAction!=PIANO_PRODUCT_ACTION_NONE||
+     (A!=PianoUsbServiceActionBoot&&A!=PianoUsbServiceActionReboot&&A!=PianoUsbServiceActionContinue)||
+     mReport.PendingAction!=PIANO_PRODUCT_ACTION_NONE)return EFI_ACCESS_DENIED;
+  mReport.RequestedCoreAction=PianoUsbServiceActionNone;mReport.RequestedResetTarget=0;
   return Request(&mRuntime,PIANO_PRODUCT_ACTION_SIMPLEINIT);
 }
 EFI_STATUS PianoBootPolicyStop(VOID) {

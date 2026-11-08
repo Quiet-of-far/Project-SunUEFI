@@ -1,20 +1,20 @@
 # 内核来源与配置
 
-Debian GNOME、Debian KDE、Nyarch GNOME 和 SteamOS 共用同一套设备内核。
-默认构建使用正式版 Linux 7.3，版本名为 `7.3.0-piano-sunuefi-cachy`。
+Arch Linux ARM + niri 使用本项目的 Piano 设备内核。
+默认构建使用稳定版 Linux 7.3.3，版本名为 `7.3.3-piano-sunuefi-cachy`。
 桌面名称属于 root 镜像，内核名称不带 `gnome` 或构建目录的 Git 后缀。
 
 ## 源码与硬件适配
 
-Linux 基线为上游 `v7.3`，提交
-`c03c1a14507dfaf8b856c2608f9ac216021fc222`。Piano 的公开硬件适配来自
+Linux 基线为上游稳定版 `v7.3.3`，提交
+`d50d994bffa3c7c6db2d8bc4c5f0c55e3f46b0cd`。Piano 的公开硬件适配来自
 `blu-sharky/linux-piano`，在新基线上继续保留本项目的显示、音频、输入、
 充电、睡眠和编解码修正。
 
 补丁按平台、显示、输入与无线、媒体、音频、Gunyah、BORE 分组，
 后续接口修正单独追加。原始来源、补丁摘要、应用顺序与每一步的源码树
 记录在 [`series.json`](../../../patches/linux/7.3/series.json)；
-旧版本补丁保留作来源参照，不会再叠加到新版本上。
+历史来源记录保留在 Git 历史中，不会再叠加到新版本上。
 
 `./build.sh linux` 从固定上游提交准备源码，在 `build/kernel-worktrees/`
 中应用补丁，使用独立编译副本生成 `artifacts/kernels/release/`。
@@ -39,6 +39,22 @@ Linux 基线为上游 `v7.3`，提交
 
 具体配置位于 [`piano-platform.config`](../../../linux/configs/piano-platform.config)，
 来源及许可见 [THIRD_PARTY.md](../../../THIRD_PARTY.md)。
+
+## 可移动存储的文件系统
+
+原厂 `piano_defconfig` 只启用 `VFAT_FS`。FAT32 介质因此可以直接挂载，
+而消费级 U 盘更常见的 exFAT 和 NTFS 会在挂载阶段被拒绝，报
+`Filesystem type exfat not configured in kernel`。分区枚举本身是好的，
+`lsblk` 能看到设备，只有挂载失败。
+
+[`piano-filesystem.config`](../../../linux/configs/piano-filesystem.config)
+补齐 `EXFAT_FS`、`NTFS3_FS` 和两者挂载时都要读取的 `NLS_UTF8`。这些编进
+内核而不做成模块，理由与 `CONFIG_USB_HID` 相同：介质插入后应当直接可用，
+不应依赖之后手工加载模块。`NLS_UTF8` 是最容易漏的一项——缺它时文件系统
+检查能通过，挂载才失败，报的是 `Unable to load IO charset utf8`，看起来
+像另一个问题。
+
+新增配置只证明内核具备这些驱动，实际读写仍需插入介质确认。
 
 ## Gunyah
 
@@ -154,7 +170,7 @@ Linux 的电池充电电流从 38°C 以上每升高 1°C 下调 300 mA，普通
 UCSI 连接状态，不能只看电池的 `Charging` / `Discharging`。使用中的现象和
 处理办法见[电源和睡眠](../../user/known-issues.md#电源和睡眠)。
 
-0029 在现有 `piano-mca-usb` 电源设备上提供标准
+0042 在现有 `piano-mca-usb` 电源设备上提供标准
 `charge_control_end_threshold` 属性。范围为 50–100，默认 100 表示沿用正常
 充电策略；设置为 80 时，任一电池计量器达到 80% 后停止电池充电，两个计量器
 都降至 75% 或以下才恢复。恢复回差固定为 5 个百分点，没有独立恢复阈值或

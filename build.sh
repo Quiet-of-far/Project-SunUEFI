@@ -30,6 +30,7 @@ PY_KERNEL
   rootfs)
     python3 tools/assemble_rootfs.py "$@" ;;
   package|esp)
+    if [[ "$command" == esp ]]; then set -- --esp-only "$@"; fi
     python3 - "$@" <<'PY_PACKAGE'
 import json, subprocess, sys
 from pathlib import Path

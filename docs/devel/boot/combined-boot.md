@@ -21,7 +21,7 @@ BOOT4 / AVB 字段依据 AOSP 的
 [boot image header](https://android.googlesource.com/platform/system/tools/mkbootimg/+/refs/heads/main/include/bootimg/bootimg.h)、
 [AVB footer](https://android.googlesource.com/platform/external/avb/+/refs/heads/main/libavb/avb_footer.h)
 与 [hash descriptor](https://android.googlesource.com/platform/external/avb/+/refs/heads/main/libavb/avb_hash_descriptor.h)。
-输入必须有一个正确的 SHA256 boot hash descriptor 和 Piano boot fingerprint；
+输入必须有一个正确的 SHA256 boot hash descriptor 和 Piano boot fingerprint（国行 `piano` 或国际版 `piano_global`）；
 工具验证 descriptor 的数据 hash，没有验证 OEM RSA 签名。
 
 ## 保持 SPLITv1
@@ -60,7 +60,7 @@ BOOT；不能凭旧 ROM 下载或历史 BOOT 备份补齐缺失的数据。
 
 ```sh
 python tools/build_boot_repack.py --arch aarch64 \
-  --sysroot build/distros/release-7.2.9/rootfs --output build/boot-repack-native
+  --sysroot build/distros/release/rootfs --output build/boot-repack-native
 ```
 
 编译入口使用现有 clang/LLD 和 ARM64 libc/GCC sysroot，输出无 PT_INTERP 的
@@ -92,7 +92,7 @@ piano-boot-repack request --input selected-boot.img --target linux --preview
 
 ```sh
 python tools/build_boot_repack.py --arch aarch64 \
-  --sysroot build/distros/release-7.2.9/rootfs --output build/boot-repack-native-check \
+  --sysroot build/distros/release/rootfs --output build/boot-repack-native-check \
   --roundtrip-stock path/to/current-stock-boot.img \
   --selector-dir path/to/current-selector-bundle
 ```

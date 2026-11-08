@@ -4,15 +4,17 @@
     "target": "release",
     "public_baseline": "352508459733d3e6d349ea5581a8dd2fd8bb4180",
     "patch_series": "patches/linux/7.3/series.json",
-    "stable_source": "https://github.com/torvalds/linux.git",
-    "stable_commit": "c03c1a14507dfaf8b856c2608f9ac216021fc222",
-    "stable_version": "7.3.0",
-    "target_tree": "366b6030cf182e62ed6598a125850524371e1548",
+    "stable_source": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+    "stable_commit": "d50d994bffa3c7c6db2d8bc4c5f0c55e3f46b0cd",
+    "stable_version": "7.3.3",
+    "uapi_sha256": "5638464826c36018483e2c06f260c1bc439fc6f66b584f56c1e76ec8846c37e5",
+    "target_tree": "28268dab4f5ce0ced78ed8d7d26d77c782a92fb6",
     "cpu_model_overlay": "linux/dts/piano-cpu-model.dtso",
     "additional_dtb_overlays": [
       "linux/dts/piano-cma.dtso",
       "linux/dts/piano-pcie-interrupt-map.dtso",
       "linux/dts/piano-usb-typec.dtso",
+      "linux/dts/piano-displayport.dtso",
       "linux/dts/piano-ufs-mcq.dtso",
       "linux/dts/piano-dsp-resources.dtso",
       "linux/dts/piano-cdsp-fastrpc.dtso",
@@ -24,7 +26,9 @@
       "linux/dts/piano-camera-privacy-led.dtso",
       "linux/dts/piano-touch-panel.dtso",
       "linux/dts/piano-pen-dock.dtso",
-      "linux/dts/piano-pen-charger.dtso"
+      "linux/dts/piano-pen-charger.dtso",
+      "linux/dts/piano-bluetooth-nvm.dtso",
+      "linux/dts/piano-ir-spi-controller.dtso"
     ],
     "root_policy": "LABEL=PIANOROOT",
     "preferred_display_mode": {
@@ -33,7 +37,7 @@
       "preserve_other_modes": true,
       "panel_vendor": "auto"
     },
-    "base_commit": "c03c1a14507dfaf8b856c2608f9ac216021fc222",
+    "base_commit": "d50d994bffa3c7c6db2d8bc4c5f0c55e3f46b0cd",
     "localversion": "-piano-sunuefi-cachy"
   },
   "debian": {

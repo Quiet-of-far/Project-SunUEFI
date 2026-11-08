@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #pragma once
 #include <Uefi.h>
+#include <Protocol/LoadedImage.h>
 #include "PianoBootPolicy.h"
 #include "PianoUfsShutdown.h"
 #include "PianoUsbStorageExperiment.h"
@@ -14,8 +15,9 @@
 #define PIANO_OWNER_GPI       BIT6
 #define PIANO_OWNER_POGO      BIT7
 #define PIANO_OWNER_DISPLAY   BIT8
+#define PIANO_OWNER_TOUCH     BIT9
 #define PIANO_OWNER_CORE_MASK (PIANO_OWNER_USB|PIANO_OWNER_UFS|PIANO_OWNER_BRIDGE|PIANO_OWNER_POLICY|PIANO_OWNER_INPUT)
-#define PIANO_OWNER_SUPPORTED_MASK (PIANO_OWNER_CORE_MASK|PIANO_OWNER_DISPLAY)
+#define PIANO_OWNER_SUPPORTED_MASK (PIANO_OWNER_CORE_MASK|PIANO_OWNER_DISPLAY|PIANO_OWNER_POGO|PIANO_OWNER_TOUCH)
 #define PIANO_OWNER_ALL_MASK  (PIANO_OWNER_SUPPORTED_MASK|PIANO_OWNER_USB_HOST|PIANO_OWNER_GPI|PIANO_OWNER_POGO)
 typedef struct {
   UINT32 Revision;
@@ -56,6 +58,11 @@ typedef struct {
   PIANO_PRODUCT_RUNTIME_PROTOCOL *Runtime;
   VOID *InputContext;
   PIANO_PRODUCT_INPUT_STOP StopInput;
+  // Required when PIANO_OWNER_POGO / PIANO_OWNER_TOUCH is started
+  VOID *PogoContext;
+  PIANO_PRODUCT_INPUT_STOP StopPogo;
+  VOID *TouchContext;
+  PIANO_PRODUCT_INPUT_STOP StopTouch;
   VOID *DisplayContext;
   PIANO_PRODUCT_DISPLAY_STOP StopDisplay;
   PIANO_PRODUCT_DISPLAY_STARTUP_REPORT DisplayStartup;
@@ -66,7 +73,7 @@ typedef enum {
   PianoProductOwnersClean,PianoProductOwnersRetained
 } PIANO_PRODUCT_OWNERS_PHASE;
 typedef enum {
-  PianoProductRequestNone=0,PianoProductRequestUsb,PianoProductRequestUi,PianoProductRequestFile
+  PianoProductRequestNone=0,PianoProductRequestUsb,PianoProductRequestUi,PianoProductRequestFile,PianoProductRequestEfi
 } PIANO_PRODUCT_REQUEST_ORIGIN;
 typedef struct {
   UINT32 Revision;
@@ -78,16 +85,18 @@ typedef struct {
   // and taken. Core retains its ownership; this ledger never invents a USB
   // action or takes/releases the file token.
   VOID *FileContext,*FileToken;
+  EFI_HANDLE EfiImage;
+  CONST EFI_LOADED_IMAGE_PROTOCOL *EfiIdentity;
   BOOLEAN Initialized,Busy,ServicesLost,Retained,Clean,PolicyStopped;
-  BOOLEAN UsbStopped,UsbStartupFailedClean,ProofAccepted,BridgeStopped,UfsStopped,InputStopped,DisplayStopped;
+  BOOLEAN UsbStopped,UsbStartupFailedClean,ProofAccepted,BridgeStopped,UfsStopped,InputStopped,DisplayStopped,PogoStopped,TouchStopped;
   BOOLEAN BootActionConsumed,OuterTplHeld,ManagerEventClosed;
   EFI_STATUS Status,PolicyStatus,UsbStatus,ProofStatus,AcceptStatus;
-  EFI_STATUS PrepareStatus,ShutdownStatus,InputStatus,DisplayStatus,EventStatus;
+  EFI_STATUS PrepareStatus,ShutdownStatus,InputStatus,DisplayStatus,EventStatus,PogoStatus,TouchStatus;
   EFI_STATUS NvStatus,FilesystemsStatus;
   UINT32 RegisteredStartedMask,RegisteredAbsentMask,RetiredMask;
   PIANO_USB_SERVICE_RETIRE_REPORT Usb;
   PIANO_UFS_RESET_REPORT Ufs;
-  PIANO_PRODUCT_INPUT_RETIRE_REPORT Input;
+  PIANO_PRODUCT_INPUT_RETIRE_REPORT Input,Pogo,Touch;
   PIANO_PRODUCT_DISPLAY_RETIRE_REPORT Display;
   PIANO_FB_BOOT_ACTION Boot;
 } PIANO_PRODUCT_OWNERS_REPORT;
@@ -113,6 +122,10 @@ EFI_STATUS PianoProductOwnersRequestUiAction(PIANO_PRODUCT_OWNERS *Owners,PIANO_
 // must identify Core's validated, taken FileSource. A real USB stop request
 // wins: inspect Report.Origin on success and release an unused file in Core.
 EFI_STATUS PianoProductOwnersRequestFileBoot(PIANO_PRODUCT_OWNERS *Owners,VOID *FileContext,VOID *FileToken);
+// Core validates the active boot manager's real loaded descendant before this
+// APP-only request. This records an EFI image, never a fabricated file token.
+EFI_STATUS PianoProductOwnersRequestEfiBoot(PIANO_PRODUCT_OWNERS *Owners,EFI_HANDLE Image,CONST EFI_LOADED_IMAGE_PROTOCOL *Identity);
+EFI_STATUS PianoProductOwnersCancelEfiBoot(PIANO_PRODUCT_OWNERS *Owners,EFI_HANDLE Image,CONST EFI_LOADED_IMAGE_PROTOCOL *Identity);
 // Compatibility entry for the existing cold reboot UI path.
 EFI_STATUS PianoProductOwnersRequestUiReboot(PIANO_PRODUCT_OWNERS *Owners);
 // After child cleanup, real acknowledged USB requests take precedence over

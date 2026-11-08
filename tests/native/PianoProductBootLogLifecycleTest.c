@@ -26,10 +26,7 @@ STATIC BOOLEAN RetainedSmmu,RetainedMapping,RetainedClock;
 STATIC UINT32 ObserveInject;
 
 BOOLEAN PianoProductDisplayRetained(VOID){return FALSE;}
-CONST CHAR8 *PianoUfsStartupDiagnostic(UINTN Line){(VOID)Line;return "";}
-EFI_STATUS PianoProductBootLogDiagnostic(CONST CHAR8 *First,CONST CHAR8 *Second){
-  (VOID)First;(VOID)Second;assert(!"retained display must not draw diagnostics");return EFI_SUCCESS;
-}
+CONST CHAR8 *PianoUfsStartupDiagnostic(VOID){return NULL;}
 INTN EFIAPI AsciiStrCmp(CONST CHAR8 *A,CONST CHAR8 *B){return strcmp(A,B);}
 INTN EFIAPI AsciiStrnCmp(CONST CHAR8 *A,CONST CHAR8 *B,UINTN N){return strncmp(A,B,N);}
 EFI_STATUS PianoProductDisplayCheckpoint(CONST CHAR8 *Name,UINT32 Stage){(VOID)Name;(VOID)Stage;return EFI_SUCCESS;}
@@ -41,6 +38,7 @@ BOOLEAN PianoDisplaySmmuRetained(VOID){return RetainedSmmu;}
 BOOLEAN PianoFrameBufferMappingRetained(VOID){return RetainedMapping;}
 BOOLEAN PianoDisplayClockRetained(VOID){return RetainedClock;}
 BOOLEAN PianoProductDisplayOwnerRetained(VOID){return FALSE;}
+BOOLEAN PianoUsbControllerHostBlocked(VOID){return FALSE;}
 VOID PianoProductDisplayFenceExit(VOID){}
 UINTN EFIAPI AsciiSPrint(CHAR8 *Buffer,UINTN Size,CONST CHAR8 *Format,...){
   (VOID)Format;assert(Size==32);strcpy(Buffer,"pre:ClockDxe");return strlen(Buffer);

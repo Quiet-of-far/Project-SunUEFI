@@ -10,14 +10,22 @@ from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/'tools'))
 import build_piano_full_kernel as full
+# the pinned stable kernel checkout is the same commit as full.COMMIT
+KERNEL=ROOT/'upstream/linux-piano'
+CONFIGURED='needs build/kernels/full-integration/.config from tools/build_piano_full_kernel.py'
 
 
 class PianoFullKernelTests(unittest.TestCase):
+    def setUp(self):
+        if not (KERNEL/'arch/arm64/configs/piano_defconfig').exists():
+            self.skipTest('pinned kernel source not fetched (./build.sh sources)')
+
     def test_uhid_fragment_is_the_only_local_module_override(self):
         fragment=(ROOT/'linux/configs/piano-bluetooth.config').read_text()
         modules=full.module_overrides(fragment)
-        public=(full.WORK/'arch/arm64/configs/piano_rootfs.config').read_text()
+        public=(KERNEL/'arch/arm64/configs/piano_rootfs.config').read_text()
         command=full.command_line((ROOT/'linux/configs/piano-full.config').read_text(),public,'ram')
+        if not (full.OUT/'.config').exists():self.skipTest(CONFIGURED)
         config=(full.OUT/'.config').read_text()
         values=full.config_values(config)
         old='CONFIG_UHID='+values['CONFIG_UHID']if values['CONFIG_UHID']!='n'else '# CONFIG_UHID is not set'
@@ -36,18 +44,39 @@ class PianoFullKernelTests(unittest.TestCase):
             if changed!=updated:
                 with self.subTest(symbol=name),self.assertRaises(ValueError):full.validate_config(changed,public,command,modules)
 
+    def test_filesystem_fragment_matches_overrides(self):
+        fragment=(ROOT/'linux/configs/piano-filesystem.config').read_text()
+        modules=full.module_overrides(fragment,'filesystem')
+        for symbol in ('CONFIG_EXFAT_FS','CONFIG_NTFS3_FS','CONFIG_NTFS3_LZX_XPRESS','CONFIG_NLS_UTF8'):
+            self.assertEqual(modules[symbol],'y')
+        self.assertEqual(len(modules),len(full.FILESYSTEM_OVERRIDES))
+        for bad in ('CONFIG_EXFAT_FS=m\n',
+                    'CONFIG_EXFAT_FS=y\nCONFIG_NTFS3_FS=y\nCONFIG_NTFS3_LZX_XPRESS=y\nCONFIG_NLS_UTF8=m\n'):
+            with self.subTest(fragment=bad),self.assertRaises(ValueError):full.module_overrides(bad,'filesystem')
+        for key,value in modules.items():
+            self.assertEqual(full.ALLOWED_OVERRIDES[key],value)
+            self.assertEqual(full.REQUIRED[key.removeprefix('CONFIG_')],value)
+
+    def test_filesystem_and_bluetooth_in_allowed_overrides(self):
+        for key,value in full.FILESYSTEM_OVERRIDES.items():
+            self.assertIn(key,full.ALLOWED_OVERRIDES)
+            self.assertEqual(full.ALLOWED_OVERRIDES[key],value)
+        for key,value in full.BLUETOOTH_OVERRIDES.items():
+            self.assertIn(key,full.ALLOWED_OVERRIDES)
+            self.assertEqual(full.ALLOWED_OVERRIDES[key],value)
+
     def test_real_generated_full_config_preserves_public_profile(self):
+        path=full.OUT/'.config'
+        if not path.exists():self.skipTest(CONFIGURED)
         full.verify_source();public=(full.WORK/'arch/arm64/configs/piano_rootfs.config').read_text()
         command=full.command_line((ROOT/'linux/configs/piano-full.config').read_text(),public,'ram')
-        path=full.OUT/'.config'
-        if not path.exists():self.skipTest('Complete candidate not yet configured')
         config=path.read_text();requirements=full.validate_config(config,public,command)
         self.assertEqual(requirements['VIDEO_QCOM_CAMSS'],'m');self.assertEqual(requirements['DRM_MSM'],'m');self.assertEqual(requirements['SND_SOC_SC8280XP'],'m')
         for symbol in ('VIDEO_OV32D40','HID_NANOSIC_WN8030','BATTERY_PIANO_MCA','CHARGER_SC8541','QCOM_Q6V5_PAS'):
             with self.subTest(symbol=symbol),self.assertRaises(ValueError):full.validate_config(config.replace('CONFIG_'+symbol+'=m','# CONFIG_'+symbol+' is not set'),public,command)
 
     def test_root_policy_is_only_public_commandline_substitution(self):
-        public=(full.WORK/'arch/arm64/configs/piano_rootfs.config').read_text();fragment=(ROOT/'linux/configs/piano-full.config').read_text()
+        public=(KERNEL/'arch/arm64/configs/piano_rootfs.config').read_text();fragment=(ROOT/'linux/configs/piano-full.config').read_text()
         command=full.command_line(fragment,public,'LABEL=PIANO_EXTERNAL')
         self.assertIn('piano.root=LABEL=PIANO_EXTERNAL',command);self.assertNotIn('root=PARTLABEL=userdata',command)
         disk=full.command_line(fragment,public,'PARTUUID=ffc480ed-c219-400b-a8f9-5f6805aa1f34')
@@ -62,7 +91,7 @@ class PianoFullKernelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='full-source-')as directory:
             work=Path(directory)
             for name in full.SOURCE_PINS:
-                path=work/name;path.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(full.WORK/name,path)
+                path=work/name;path.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(KERNEL/name,path)
             def git(*args):return subprocess.check_output(['git','-C',str(work),*args],stderr=subprocess.STDOUT,text=True).strip()
             git('init','-q');git('add','arch');git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture')
             commit=git('rev-parse','HEAD')
@@ -72,13 +101,13 @@ class PianoFullKernelTests(unittest.TestCase):
                 path.unlink();name=next(iter(full.SOURCE_PINS));git('update-index','--assume-unchanged',name)
                 (work/name).write_text((work/name).read_text()+'\n# hidden drift\n');self.assertFalse(git('status','--porcelain'))
                 with self.assertRaisesRegex(ValueError,'config changed'):full.verify_source(work)
-                shutil.copyfile(full.WORK/name,work/name);git('update-index','--no-assume-unchanged',name)
+                shutil.copyfile(KERNEL/name,work/name);git('update-index','--no-assume-unchanged',name)
                 (work/'new').write_text('new');git('add','new');git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','new head')
                 with self.assertRaisesRegex(ValueError,'HEAD drifted'):full.verify_source(work)
                 descendant=git('rev-parse','HEAD');full.verify_source(work,descendant)
                 disconnected=git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit-tree','HEAD^{tree}','-m','disconnected')
                 git('checkout','--detach',disconnected)
-                with self.assertRaisesRegex(ValueError,'must descend'):full.verify_source(work,disconnected)
+                with self.assertRaisesRegex(ValueError,'does not descend'):full.verify_source(work,disconnected)
 
     def test_real_module_vermagic_hash_and_duplicate_rejection(self):
         source=ROOT/'artifacts/kernels/stable/userspace-debug/modules'

@@ -23,6 +23,8 @@ typedef struct {
 // Shared core starts real USB/UFS/input first; this policy does not create a
 // transport, stop it on UI return, or turn an unbound worker into USB-ready.
 EFI_STATUS PianoBootPolicyInitialize(EFI_HANDLE Parent);
+// Root binds the installed Linux entry once; RequestAction remains CPU-only.
+EFI_STATUS PianoBootPolicySetLinuxEntry(EFI_STATUS (*Start)(VOID *,PIANO_PRODUCT_RUNTIME_PROTOCOL *,EFI_HANDLE),VOID *Context);
 // Core supplies the bounded /chosen/bootargs property from its validated FDT.
 // Missing, malformed or duplicate mode tokens keep the normal SimpleInit default.
 EFI_STATUS PianoBootPolicySetEntryBootArgs(CONST CHAR8 *BootArgs,UINTN Bytes);
@@ -44,6 +46,8 @@ EFI_STATUS PianoBootPolicyRun(VOID);
 EFI_STATUS PianoBootPolicyDispatchPending(VOID);
 // Core may return to the existing menu after a clean failed ESP read.
 EFI_STATUS PianoBootPolicyCancelStable(VOID);
+// Back to the menu when an exit cannot start yet (USB host still in use)
+EFI_STATUS PianoBootPolicyCancelExit(VOID);
 // Parent must keep code/state alive while installed, or Stop before returning.
 // This stops policy notifications only, never shared device/service owners.
 EFI_STATUS PianoBootPolicyStop(VOID);

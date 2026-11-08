@@ -16,7 +16,6 @@ STATIC UINT32 mCheckpointCount,mCheckpointReplayCalls;
 #endif
 
 STATIC CONST CHAR8 *mNames[]={"DISPLAY","PAYLOAD","SMEM","INPUT","UFS","USB","MENU"};
-STATIC CHAR8 mLastStage[32];
 STATIC CONST UINT8 mLetters[26][5]={
   {0x7e,0x11,0x11,0x11,0x7e},{0x7f,0x49,0x49,0x49,0x36},{0x3e,0x41,0x41,0x41,0x22},
   {0x7f,0x41,0x41,0x22,0x1c},{0x7f,0x49,0x49,0x49,0x41},{0x7f,0x09,0x09,0x09,0x01},
@@ -39,6 +38,9 @@ STATIC struct {
   PIANO_PRODUCT_BOOT_LOG_ALIVE Alive;
   UINT32 Width,Height,X,Y,Scale,Pitch,PanelWidth;
   EFI_STATUS Fault;
+  CONST CHAR8 *Stage;
+  EFI_STATUS StageStatus;
+  UINT64 StageElapsedMs;
 } mCanvas;
 
 STATIC EFI_GRAPHICS_OUTPUT_BLT_PIXEL Color(UINT8 R,UINT8 G,UINT8 B){
@@ -172,7 +174,7 @@ EFI_STATUS PianoProductBootLogInitialize(EFI_GRAPHICS_OUTPUT_PROTOCOL *Gop,PIANO
   mCanvas.Gop=Gop;mCanvas.Alive=Alive;mCanvas.Width=Width;mCanvas.Height=Height;
   mCanvas.Scale=Scale;mCanvas.Pitch=10*Scale;mCanvas.PanelWidth=402*Scale;
   mCanvas.X=Width*6/100;mCanvas.Y=Top;mCanvas.Fault=EFI_SUCCESS;
-  mLastStage[0]=0;
+  mCanvas.Stage=NULL;mCanvas.StageStatus=EFI_NOT_STARTED;mCanvas.StageElapsedMs=0;
   for(UINT32 Row=0;Row<ARRAY_SIZE(mNames);++Row){
     EFI_STATUS Status=DrawRow(Row,"--","-- MS","--");if(Status!=EFI_SUCCESS)return Status;
   }
@@ -188,20 +190,27 @@ EFI_STATUS PianoProductBootLogStage(CONST CHAR8 *Name,EFI_STATUS Status,UINT64 E
   STATIC CONST struct {CONST CHAR8 *Name,*Label;} UfsFailures[]={
     {"UFS LINK","LINK FAILED"},{"UFS SMMU","SMMU FAILED"},
     {"UFS DMA","DMA FAILED"},{"UFS NOP","NOP FAILED"},
-    {"UFS POWER","POWER FAILED"},
-    {"UFS QUERY","QUERY FAILED"},{"UFS CAPACITY","CAPACITY FAIL"},
+    {"UFS POWER","POWER FAILED"},{"UFS QUERY","QUERY FAILED"},{"UFS CAPACITY","CAPACITY FAIL"},
+    {"UFS DATA DMA","DATA DMA FAIL"},{"UFS LUNS","LUN LIST FAIL"},
+    {"UFS CAPACITY 0","CAPACITY 0"},{"UFS CAPACITY 1","CAPACITY 1"},
+    {"UFS CAPACITY 2","CAPACITY 2"},{"UFS CAPACITY 3","CAPACITY 3"},
+    {"UFS CAPACITY 4","CAPACITY 4"},{"UFS CAPACITY 5","CAPACITY 5"},
+    {"UFS CAPACITY 6","CAPACITY 6"},{"UFS CAPACITY 7","CAPACITY 7"},
     {"UFS GPT","GPT FAILED"},{"UFS BLOCKIO","BLOCKIO FAIL"},
     {"UFS VOLUME","VOLUME FAIL"}};
   if(Row==ARRAY_SIZE(mNames))for(UINTN I=0;I<ARRAY_SIZE(UfsFailures);++I) {
     if(Equal(Name,UfsFailures[I].Name)){Row=4;Label=UfsFailures[I].Label;break;}
   }
   if(Row==ARRAY_SIZE(mNames))return EFI_INVALID_PARAMETER;
-  UINTN Index=0;
-  for(;Name[Index]&&Index<sizeof(mLastStage)-1;++Index)mLastStage[Index]=Name[Index];
-  mLastStage[Index]=0;
+  // Keep a canonical static name: callers may pass a temporary string.
+  CONST CHAR8 *Stage=mNames[Row];
+  for(UINTN I=0;I<ARRAY_SIZE(UfsFailures);++I)
+    if(Equal(Name,UfsFailures[I].Name)){Stage=UfsFailures[I].Name;break;}
   CHAR8 Elapsed[24],Code[19];Decimal(ElapsedMs,Elapsed);Hex(Status,Code);
-  return DrawRow(Row,Label,Elapsed,
+  EFI_STATUS Paint=DrawRow(Row,Label,Elapsed,
     Status==EFI_SUCCESS||Status==EFI_NOT_STARTED?"--":Code);
+  if(Paint==EFI_SUCCESS){mCanvas.Stage=Stage;mCanvas.StageStatus=Status;mCanvas.StageElapsedMs=ElapsedMs;}
+  return Paint;
 }
 STATIC EFI_STATUS MessageText(CONST CHAR16 *String,UINT32 X,UINT32 Y,UINT32 Scale,EFI_GRAPHICS_OUTPUT_BLT_PIXEL Ink){
   for(UINTN I=0;String&&String[I];++I){
@@ -230,19 +239,15 @@ EFI_STATUS PianoProductBootLogMessage(CONST CHAR16 *Title,CONST CHAR16 *Detail,E
   S=MessageText(L"长按电源重启",X,Y+72*Scale,Scale,Color(50,54,60));if(S!=EFI_SUCCESS)return S;
   S=MessageText(L"在选择画面按音量上进入 Android",X,Y+100*Scale,Scale,Color(50,54,60));if(S!=EFI_SUCCESS)return S;
   CHAR8 Code[19];Hex(Status,Code);UINT32 Saved=mCanvas.Scale;mCanvas.Scale=Scale;
-  S=Text(Code,X,Y+140*Scale,Color(120,124,130));
-  // The full-screen failure message replaces the startup rows. Preserve the
-  // failing substage beside the code when USB and persistent logs are absent.
-  if(S==EFI_SUCCESS)S=Text(mLastStage,X+20*6*Scale,Y+140*Scale,Color(120,124,130));
-  mCanvas.Scale=Saved;return S;
-}
-EFI_STATUS PianoProductBootLogDiagnostic(CONST CHAR8 *First,CONST CHAR8 *Second){
-  if(!mCanvas.Gop||!mCanvas.Alive)return EFI_NOT_STARTED;
-  UINT32 Scale=MIN(mCanvas.Width,mCanvas.Height)/660;if(!Scale)Scale=1;
-  UINT32 MessageScale=MIN(mCanvas.Width,mCanvas.Height)/440;if(!MessageScale)MessageScale=1;
-  UINT32 X=mCanvas.Width*7/100,Y=mCanvas.Height*26/100+158*MessageScale;
-  UINT32 Saved=mCanvas.Scale;mCanvas.Scale=Scale;
-  EFI_STATUS S=Text(First?First:"",X,Y,Color(120,124,130));
-  if(S==EFI_SUCCESS)S=Text(Second?Second:"",X,Y+12*Scale,Color(120,124,130));
+  UINT32 CodeY=Y+140*Scale;
+  // The failure page replaces the progress panel. Carry its matching failed
+  // stage onto this page so the concrete storage step is not lost on clear.
+  if(mCanvas.Stage && mCanvas.StageStatus==Status && Status!=EFI_SUCCESS && Status!=EFI_NOT_STARTED){
+    CHAR8 Elapsed[24];Decimal(mCanvas.StageElapsedMs,Elapsed);
+    S=Text(mCanvas.Stage,X,CodeY,Color(120,124,130));
+    if(S==EFI_SUCCESS)S=Text(Elapsed,X+(Length(mCanvas.Stage)+2)*6*Scale,CodeY,Color(120,124,130));
+    CodeY=Y+158*Scale;
+  }
+  if(S==EFI_SUCCESS)S=Text(Code,X,CodeY,Color(120,124,130));
   mCanvas.Scale=Saved;return S;
 }

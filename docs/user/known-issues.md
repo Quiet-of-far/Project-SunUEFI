@@ -26,7 +26,7 @@ fastboot -s SunUEFI-piano getvar product
 
 ## 显示和图形
 
-* 默认 120 Hz，可切换刷新率。12-bit / FRC 和连续可变刷新率（VRR）没有实现。
+* 默认 120 Hz，可切换刷新率。12-bit / FRC 没有实现。
 * 部分 GTK 窗口连续缩放时帧率偏低，约每秒提交 30 帧。
 * 夜灯使用通用 sRGB 配置，不是原厂校准的颜色。
 
@@ -41,6 +41,11 @@ fastboot -s SunUEFI-piano getvar product
 * 常见 Windows 游戏（如《原神》）若需特定参数，属于游戏和运行库自身的机制，与固件或系统无关。
 * 红外发射没有验证。
 * Windows / WinPE 是目标，还不能启动。
+
+## 外接存储
+
+* U 盘、移动硬盘和读卡器在 Linux 里可用，FAT32、exFAT 和 NTFS 都支持读写。
+* 早期镜像只带 FAT32 支持。插上 exFAT 或 NTFS 介质时设备能识别、分区能看到，但打开会提示 `Filesystem type ... not configured in kernel`，换成包含该支持的镜像即可。不是介质或接口的问题。
 
 ## 其他
 

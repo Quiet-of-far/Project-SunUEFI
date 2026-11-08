@@ -28,6 +28,19 @@ STATIC EFI_STATUS AtApp(PIANO_PRODUCT_OWNERS *Owners) {
   if(Owners->Report.ServicesLost)return EFI_ACCESS_DENIED;
   return Old==TPL_APPLICATION?EFI_SUCCESS:EFI_UNSUPPORTED;
 }
+// No DMA does not make live callbacks, protocols or clock references safe.
+// Apply the same checked input-stop report to each registered input backend.
+STATIC EFI_STATUS RetireInput(PIANO_PRODUCT_OWNERS *Owners,UINT32 Owner,PIANO_PRODUCT_INPUT_STOP Stop,VOID *Context,
+                                   PIANO_PRODUCT_INPUT_RETIRE_REPORT *Report,EFI_STATUS *Status,BOOLEAN *Stopped) {
+  if(!(Owners->Report.RegisteredStartedMask&Owner))return EFI_SUCCESS;
+  EFI_STATUS S=AtApp(Owners);if(S!=EFI_SUCCESS||Owners->Report.ServicesLost)return Retain(Owners,S);
+  *Status=Stop(Context,Report);
+  if(Owners->Report.ServicesLost||*Status!=EFI_SUCCESS||Report->Revision!=1||!Report->Started||
+     !Report->Returned||!Report->Clean||Report->Retained||Report->ServicesLost||
+     Report->Status!=EFI_SUCCESS||Report->Timer!=EFI_SUCCESS||Report->Protocols!=EFI_SUCCESS)
+    return Retain(Owners,*Status==EFI_SUCCESS?EFI_COMPROMISED_DATA:*Status);
+  *Stopped=TRUE;Owners->Report.RetiredMask|=Owner;return EFI_SUCCESS;
+}
 STATIC BOOLEAN PolicyLive(CONST PIANO_BOOT_POLICY_REPORT *Policy) {
   return Policy && Policy->Initialized && Policy->ProtocolInstalled && !Policy->ServicesLost && !Policy->Retained;
 }
@@ -99,6 +112,8 @@ EFI_STATUS PianoProductOwnersInitialize(PIANO_PRODUCT_OWNERS *Owners,CONST PIANO
   if(AbsentUsb?!StartupUsbConfig(Config):Config->StartupUsbProof!=NULL)return EFI_NOT_READY;
   if(Config->StartedOwnerMask&~PIANO_OWNER_SUPPORTED_MASK)return EFI_UNSUPPORTED;
   if(!DisplayRegistration(Config))return EFI_NOT_READY;
+  if((Config->StartedOwnerMask&PIANO_OWNER_POGO) && !Config->StopPogo)return EFI_INVALID_PARAMETER;
+  if((Config->StartedOwnerMask&PIANO_OWNER_TOUCH) && !Config->StopTouch)return EFI_INVALID_PARAMETER;
   if(!gBS || !gBS->CreateEventEx || !gBS->CloseEvent || !gBS->LocateProtocol)return EFI_UNSUPPORTED;
   EFI_STATUS S=AtApp(Owners);if(S!=EFI_SUCCESS)return S;
   CONST PIANO_BOOT_POLICY_REPORT *Policy=PianoBootPolicyReport();if(!PolicyLive(Policy))return EFI_NOT_READY;
@@ -119,7 +134,7 @@ EFI_STATUS PianoProductOwnersInitialize(PIANO_PRODUCT_OWNERS *Owners,CONST PIANO
   Owners->Report.Display.Status=Owners->Report.Display.Release=Owners->Report.Display.CounterStatus=
     Owners->Report.Display.GccReadback=Owners->Report.Display.GccReadbackEnd=Owners->Report.Display.Cleanup=EFI_NOT_STARTED;
   Owners->Report.RegisteredStartedMask=Config->StartedOwnerMask;Owners->Report.RegisteredAbsentMask=Config->AbsentOwnerMask;
-  Owners->Report.UsbStatus=EFI_NOT_STARTED;
+  Owners->Report.UsbStatus=EFI_NOT_STARTED;Owners->Report.PogoStatus=Owners->Report.TouchStatus=EFI_NOT_STARTED;
   if(AbsentUsb){Owners->UsbProof=*Config->StartupUsbProof;Owners->Report.UsbStartupFailedClean=TRUE;}
   // Runtime is not dereferenced until a fresh protocol lookup matches it.
   PIANO_PRODUCT_RUNTIME_PROTOCOL *Fresh=NULL;EFI_GUID Guid=PIANO_PRODUCT_RUNTIME_PROTOCOL_GUID;
@@ -152,6 +167,7 @@ EFI_STATUS PianoProductOwnersObserveUsbAction(PIANO_PRODUCT_OWNERS *Owners) {
   Owners->Report.RequestedAction=Usb.Action;Owners->Report.Origin=PianoProductRequestUsb;
   Owners->Report.ResetTarget=PIANO_PRODUCT_RESET_NORMAL;
   Owners->Report.FileContext=NULL;Owners->Report.FileToken=NULL;Owners->Report.Phase=PianoProductOwnersReturnRequested;
+  Owners->Report.EfiImage=NULL;Owners->Report.EfiIdentity=NULL;
   return Owners->Report.Status=EFI_SUCCESS;
 }
 EFI_STATUS PianoProductOwnersRequestUiAction(PIANO_PRODUCT_OWNERS *Owners,PIANO_USB_SERVICE_ACTION Action) {
@@ -164,7 +180,8 @@ EFI_STATUS PianoProductOwnersRequestUiAction(PIANO_PRODUCT_OWNERS *Owners,PIANO_
   if(!PolicyLive(Policy))return Retain(Owners,EFI_ACCESS_DENIED);
   if(Policy->Dispatching || Policy->Pumping || Policy->ActiveAction!=PIANO_PRODUCT_ACTION_NONE)return EFI_NOT_READY;
   if(Policy->RequestedCoreAction!=Action)return EFI_NOT_READY;
-  if(Owners->Report.Origin==PianoProductRequestUsb || Owners->Report.Origin==PianoProductRequestFile)return Retain(Owners,EFI_COMPROMISED_DATA);
+  if(Owners->Report.Origin==PianoProductRequestUsb || Owners->Report.Origin==PianoProductRequestFile ||
+     Owners->Report.Origin==PianoProductRequestEfi)return Retain(Owners,EFI_COMPROMISED_DATA);
   if(Owners->Report.Origin==PianoProductRequestUi && Owners->Report.RequestedAction!=Action)return Retain(Owners,EFI_COMPROMISED_DATA);
   if(Owners->Report.Origin==PianoProductRequestUi && Owners->Report.ResetTarget!=Policy->RequestedResetTarget)return Retain(Owners,EFI_COMPROMISED_DATA);
   S=FreshRuntime(Owners);if(S!=EFI_SUCCESS)return Retain(Owners,S);
@@ -217,6 +234,47 @@ EFI_STATUS PianoProductOwnersRequestFileBoot(PIANO_PRODUCT_OWNERS *Owners,VOID *
 }
 EFI_STATUS PianoProductOwnersRequestUiReboot(PIANO_PRODUCT_OWNERS *Owners) {
   return PianoProductOwnersRequestUiAction(Owners,PianoUsbServiceActionReboot);
+}
+EFI_STATUS PianoProductOwnersRequestEfiBoot(PIANO_PRODUCT_OWNERS *Owners,EFI_HANDLE Image,CONST EFI_LOADED_IMAGE_PROTOCOL *Identity) {
+  if(!Owners || !Owners->Report.Initialized || !Image || !Identity)return EFI_INVALID_PARAMETER;
+  if(Owners->Report.Retained || Owners->Report.Clean)return EFI_ACCESS_DENIED;
+  if(Owners->Report.Busy)return EFI_ALREADY_STARTED;
+  EFI_STATUS S=AtApp(Owners);if(S!=EFI_SUCCESS)return S;
+  CONST PIANO_BOOT_POLICY_REPORT *Policy=PianoBootPolicyReport();
+  if(!PolicyLive(Policy))return Retain(Owners,EFI_ACCESS_DENIED);
+  if(Policy->Dispatching || Policy->Pumping || Policy->ActiveAction!=PIANO_PRODUCT_ACTION_NONE ||
+     Policy->RequestedCoreAction!=PianoUsbServiceActionBoot)return EFI_NOT_READY;
+  if(UsbAbsent(Owners)){
+    S=FreshAbsentUsb(Owners);if(S!=EFI_SUCCESS)return Retain(Owners,S);
+  }else{
+    PIANO_DWC3_SERVICE_STATUS Usb={0};S=PianoUsbControllerServiceGetStatus(&Usb);
+    if(S!=EFI_SUCCESS || Usb.Revision!=1 || !Usb.Started || Usb.Retained || Usb.ServicesLost)
+      return Retain(Owners,S==EFI_SUCCESS?EFI_COMPROMISED_DATA:S);
+    // A real host action keeps priority; return before any device retirement.
+    if(Usb.Phase==PianoUsbServiceStopRequested){
+      S=PianoProductOwnersObserveUsbAction(Owners);return S==EFI_SUCCESS?EFI_ABORTED:S;
+    }
+    if(Usb.Phase!=PianoUsbServiceListening || Usb.Action!=PianoUsbServiceActionNone)
+      return Retain(Owners,EFI_COMPROMISED_DATA);
+  }
+  if(Owners->Report.Origin!=PianoProductRequestNone &&
+     (Owners->Report.Origin!=PianoProductRequestEfi || Owners->Report.EfiImage!=Image ||
+      Owners->Report.EfiIdentity!=Identity))return EFI_ACCESS_DENIED;
+  S=FreshRuntime(Owners);if(S!=EFI_SUCCESS)return Retain(Owners,S);
+  Owners->Report.Origin=PianoProductRequestEfi;Owners->Report.RequestedAction=PianoUsbServiceActionBoot;
+  Owners->Report.EfiImage=Image;Owners->Report.EfiIdentity=Identity;
+  Owners->Report.Phase=PianoProductOwnersReturnRequested;
+  return Owners->Report.Status=EFI_SUCCESS;
+}
+EFI_STATUS PianoProductOwnersCancelEfiBoot(PIANO_PRODUCT_OWNERS *Owners,EFI_HANDLE Image,CONST EFI_LOADED_IMAGE_PROTOCOL *Identity) {
+  if(!Owners||!Image||!Identity)return EFI_INVALID_PARAMETER;
+  EFI_STATUS S=AtApp(Owners);if(S!=EFI_SUCCESS)return S;
+  PIANO_PRODUCT_OWNERS_REPORT *R=&Owners->Report;
+  if(!R->Initialized||R->Retained||R->Clean||R->Busy||R->Phase!=PianoProductOwnersReturnRequested||
+     R->Origin!=PianoProductRequestEfi||R->EfiImage!=Image||R->EfiIdentity!=Identity)return EFI_ACCESS_DENIED;
+  R->EfiImage=NULL;R->EfiIdentity=NULL;R->Origin=PianoProductRequestNone;
+  R->RequestedAction=PianoUsbServiceActionNone;R->Phase=PianoProductOwnersRunning;
+  return R->Status=EFI_SUCCESS;
 }
 EFI_STATUS PianoProductOwnersResolveReturnedAction(PIANO_PRODUCT_OWNERS *Owners) {
   if(!Owners || !Owners->Report.Initialized)return EFI_INVALID_PARAMETER;
@@ -274,10 +332,10 @@ EFI_STATUS PianoProductOwnersRetire(PIANO_PRODUCT_OWNERS *Owners) {
   BOOLEAN AbsentUsb=UsbAbsent(Owners);
   PIANO_DWC3_SERVICE_STATUS Usb;ZeroMem(&Usb,sizeof(Usb));
   S=AbsentUsb?FreshAbsentUsb(Owners):PianoUsbControllerServiceGetStatus(&Usb);
-  if(S==EFI_SUCCESS && Usb.Revision==1 && Owners->Report.Origin==PianoProductRequestFile &&
+  if(S==EFI_SUCCESS && Usb.Revision==1 && (Owners->Report.Origin==PianoProductRequestFile || Owners->Report.Origin==PianoProductRequestEfi) &&
      Usb.Phase==PianoUsbServiceStopRequested) {
-    // Nothing is retired yet. Core must discard its unselected file source
-    // before retrying the now-selected real USB action.
+    // Nothing is retired yet. Preserve the real USB action; a selected raw
+    // file, if present, must be discarded by Core before retrying that action.
     S=PianoProductOwnersObserveUsbAction(Owners);
     return S==EFI_SUCCESS?EFI_NOT_READY:S;
   }
@@ -290,6 +348,10 @@ EFI_STATUS PianoProductOwnersRetire(PIANO_PRODUCT_OWNERS *Owners) {
     Owners->Report.Origin==PianoProductRequestFile?
     (Owners->Report.RequestedAction==PianoUsbServiceActionBoot && Policy->RequestedCoreAction==PianoUsbServiceActionBoot &&
      Owners->Report.FileContext && Owners->Report.FileToken &&
+     (AbsentUsb||(Usb.Started && Usb.Phase==PianoUsbServiceListening && Usb.Action==PianoUsbServiceActionNone))):
+    Owners->Report.Origin==PianoProductRequestEfi?
+    (Owners->Report.RequestedAction==PianoUsbServiceActionBoot && Policy->RequestedCoreAction==PianoUsbServiceActionBoot &&
+     Owners->Report.EfiImage && Owners->Report.EfiIdentity &&
      (AbsentUsb||(Usb.Started && Usb.Phase==PianoUsbServiceListening && Usb.Action==PianoUsbServiceActionNone))):FALSE;
   if(S!=EFI_SUCCESS || (!AbsentUsb&&(Usb.Revision!=1 || Usb.ServicesLost || Usb.Retained)) || !OriginReady)
     return Retain(Owners,S==EFI_SUCCESS?EFI_COMPROMISED_DATA:S);
@@ -349,6 +411,11 @@ EFI_STATUS PianoProductOwnersRetire(PIANO_PRODUCT_OWNERS *Owners) {
      Input->Status!=EFI_SUCCESS || Input->Timer!=EFI_SUCCESS || Input->Protocols!=EFI_SUCCESS || Owners->Report.ServicesLost)
     return Retain(Owners,S==EFI_SUCCESS?EFI_COMPROMISED_DATA:S);
   Owners->Report.InputStopped=TRUE;Owners->Report.RetiredMask|=PIANO_OWNER_INPUT;
+  S=RetireInput(Owners,PIANO_OWNER_POGO,Owners->Config.StopPogo,Owners->Config.PogoContext,
+    &Owners->Report.Pogo,&Owners->Report.PogoStatus,&Owners->Report.PogoStopped);
+  if(S==EFI_SUCCESS)S=RetireInput(Owners,PIANO_OWNER_TOUCH,Owners->Config.StopTouch,Owners->Config.TouchContext,
+    &Owners->Report.Touch,&Owners->Report.TouchStatus,&Owners->Report.TouchStopped);
+  if(S!=EFI_SUCCESS)return S;
   if(Owners->Report.RegisteredStartedMask&PIANO_OWNER_DISPLAY){
     S=AtApp(Owners);if(S!=EFI_SUCCESS||Owners->Report.ServicesLost)return Retain(Owners,S);
     if(!Owners->Config.StopDisplay||!Owners->Config.DisplayContext)return Retain(Owners,EFI_COMPROMISED_DATA);

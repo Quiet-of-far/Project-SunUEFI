@@ -1,4 +1,5 @@
 """Actual product staging/INF and freshness for the shared OS loader, no device."""
+import os
 from pathlib import Path
 import json
 import shutil
@@ -9,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[2]
+TOOLCHAIN=Path(os.environ.get('SUNUEFI_TOOLCHAIN_ROOT',ROOT/'build/host-tools/usr'))
 sys.path.insert(0,str(ROOT/'tools'))
 import prepare_product as product
 import build_integrity as integrity
@@ -19,6 +21,9 @@ from firmware_workspace import active_root
 
 class ProductOsBootWiringTests(unittest.TestCase):
     def fixture(self,root):
+        # Installed handoff files, the generated memory map and the derived ClockDxe come from the build
+        prepared=active_root(ROOT)
+        if prepared==ROOT:self.skipTest('firmware workspace not prepared; run ./build.sh uefi')
         import piano_vendor_inputs as vendor
         shutil.copytree(ROOT/'vendor/piano',root/'vendor/piano')
         for relative in ('tools/piano_vendor_inputs.py','tools/apply_firmware_patches.py'):
@@ -40,7 +45,6 @@ class ProductOsBootWiringTests(unittest.TestCase):
             target=app/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(path,target)
         record=product.prepare_os_boot(root,app)
         shutil.copytree(ROOT/'uefi/components/product-handoff',root/'uefi/components/product-handoff')
-        prepared=active_root(ROOT)
         for relative in prepare_handoff(prepared,apply=False)['files']:
             src=prepared/relative;dst=root/relative;dst.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(src,dst)
         native=prepare_handoff(root,apply=True)
@@ -106,7 +110,7 @@ class ProductOsBootWiringTests(unittest.TestCase):
             for name in bound:
                 if name.endswith('.c'):
                     output=root/(Path(name).stem+'.obj')
-                    subprocess.run([str(ROOT/'build/host-tools/usr/bin/clang'),'--target=aarch64-windows-msvc','-ffreestanding','-fshort-wchar','-c','-Wall','-Wextra','-Werror',
+                    subprocess.run([str(TOOLCHAIN/'bin/clang'),'--target=aarch64-windows-msvc','-ffreestanding','-fshort-wchar','-c','-Wall','-Wextra','-Werror',
                                     '-I',str(include),'-I',str(include/'AArch64'),'-I',str(crypto),'-I',str(ROOT/'upstream/Mu-Silicium/Silicon/Silicium/SiliciumPkg/Include'),'-I',str(staged),str(staged/name),'-o',str(output)],check=True)
                     self.assertGreater(output.stat().st_size,0)
 
@@ -142,7 +146,7 @@ class ProductOsBootWiringTests(unittest.TestCase):
         status=product.backend_status()['efi_android_linux_boot']
         self.assertEqual(status['shared_os_loader'],'COMPILED_PLATFORM_NOT_READY')
         self.assertFalse(status['platform_bound']);self.assertFalse(status['full_ddr_verified'])
-        self.assertEqual(status['source_budget_bytes'],64*1024*1024)
+        self.assertEqual(status['source_budget_bytes'],128*1024*1024)
 
     def test_display_mapping_freshness_and_no_readiness_promotion(self):
         for mutation in ('staged_row','target_row','generator','driver_pin','parser','binding','hardware_ready','missing_row'):

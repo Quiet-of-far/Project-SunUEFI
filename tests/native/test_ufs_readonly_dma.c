@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #include <assert.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdarg.h>
 #undef NULL
 #include "../../uefi/core/PianoUfsDmaLayout.c"
 #include "../../uefi/core/PianoUfsReadOnlyDma.c"
@@ -11,7 +11,6 @@ static EFI_BOOT_SERVICES bs;static UINT8 trl[1024],ucd[1024],data[4096];static U
 static unsigned begins,completes;static int timeout,bad_ocs;
 static unsigned unit_attentions,read_commands;
 static int unit_attention_full_residual;
-static unsigned capacity_attentions;
 static UINT32 uic_is,uic_result,tx_state=1,mem_config;
 static UINT32 power_mode=0x33;
 static unsigned power_queries,ssu_commands,power_waits,pre_power_queries,ssu_unit_attentions;
@@ -20,19 +19,12 @@ BOOLEAN EFIAPI DebugPrintEnabled(VOID){return FALSE;}
 BOOLEAN EFIAPI DebugPrintLevelEnabled(UINTN Level){return FALSE;}
 VOID EFIAPI DebugPrint(UINTN Level,CONST CHAR8 *Format,...){ }
 VOID *EFIAPI ZeroMem(VOID *P,UINTN N){return memset(P,0,N);}
-UINTN EFIAPI AsciiSPrint(CHAR8 *Buffer,UINTN Size,CONST CHAR8 *Format,...){
-  char fmt[256];assert(strlen(Format)<sizeof(fmt));strcpy(fmt,Format);
-  for(unsigned i=0;fmt[i];++i)if(fmt[i]=='%'&&fmt[i+1]=='a')fmt[i+1]='s';
-  va_list args;va_start(args,Format);int n=vsnprintf(Buffer,Size,fmt,args);va_end(args);
-  assert(n>=0 && (UINTN)n<Size);return (UINTN)n;
-}
-EFI_STATUS PianoDmaAllocate(PIANO_DMA_DEVICE *Device,UINTN Bytes,UINTN Alignment,
-  UINT8 AddressBits,PIANO_DMA_DIRECTION Direction,PIANO_DMA_BUFFER *Buffer){
-  (VOID)Device;(VOID)Alignment;(VOID)AddressBits;(VOID)Direction;assert(Bytes==sizeof(data));
-  Buffer->Cpu=data;Buffer->Bytes=sizeof(data);Buffer->DeviceAddress=0x40002000;return EFI_SUCCESS;
-}
-EFI_STATUS PianoDmaMap(PIANO_DMA_BUFFER *Buffer){Buffer->Mapped=TRUE;return EFI_SUCCESS;}
 INTN EFIAPI AsciiStrCmp(CONST CHAR8 *A,CONST CHAR8 *B){return strcmp(A,B);}
+UINTN EFIAPI AsciiSPrint(CHAR8 *Buffer,UINTN Bytes,CONST CHAR8 *Format,...){
+  if(!Bytes)return 0;
+  va_list Args;va_start(Args,Format);int N=vsnprintf(Buffer,Bytes,Format,Args);va_end(Args);
+  return N<0?0:(UINTN)N<Bytes?(UINTN)N:Bytes-1;
+}
 VOID EFIAPI MemoryFence(VOID){ }
 VOID EFIAPI CpuPause(VOID){ }
 VOID EFIAPI CpuDeadLoop(VOID){assert(!"Unexpected reset fallthrough");}
@@ -82,17 +74,13 @@ UINT32 EFIAPI MmioWrite32(UINTN A,UINT32 Value){
         else if(!ssu_keep_mode)power_mode=0x11;
         bell=0;return Value;
       }
-      if(unit_attentions || (ucd[16]==0x9e && capacity_attentions)){
-        if(unit_attentions)--unit_attentions;else --capacity_attentions;r[7]=2;Be16(r+10,20);Be16(r+32,18);r[34]=0x70;r[36]=6;r[46]=0x29;
+      if(unit_attentions){
+        --unit_attentions;r[7]=2;Be16(r+10,20);Be16(r+32,18);r[34]=0x70;r[36]=6;r[46]=0x29;
         // CHECK CONDITION may report all bytes untransferred with F=0.
         if(unit_attention_full_residual){r[1]=0;Be32(r+12,ReadBe32(ucd+12));}
         bell=0;return Value;
       }
       assert(ucd[1]==0x40 && ReadLe32(trl+28)==0x00400001);
-      if(power_mode!=0x11 && power_mode!=0){
-        r[7]=2;Be16(r+10,20);Be16(r+32,18);r[34]=0x70;
-        r[36]=2;r[46]=4;r[47]=2;bell=0;return Value;
-      }
       if(ucd[16]==0xa0){Be32(data,8);data[9]=0;r[1]=0x20;Be32(r+12,4096-16);}
       else if(ucd[16]==0x9e){Be32(data+4,0x3000000);Be32(data+8,4096);}
       else assert(ucd[16]==0x28);
@@ -107,11 +95,14 @@ static void ConfigurePower(UINT32 Mode){
   power_mode=Mode;power_queries=ssu_commands=power_waits=pre_power_queries=ssu_unit_attentions=0;
   power_query_fail=ssu_fail=ssu_keep_mode=ssu_response_one_good=0;
   unit_attentions=read_commands=0;unit_attention_full_residual=0;
-  mPowerMode=MAX_UINT32;
+  mPowerMode=MAX_UINT32;mReadFailure.Present=FALSE;
 }
 static void ExpectPowerQuiet(void){
   assert(begins==completes&&!bell&&!run&&!task_run&&!mData.Active&&!mUcd.Active&&!mTrl.Active);
   assert(read_commands==ssu_commands);
+}
+static void ExpectPowerDiagnostic(CONST CHAR8 *Expected){
+  CONST CHAR8 *Diagnostic=PianoUfsStartupDiagnostic();assert(Diagnostic&&strstr(Diagnostic,Expected));
 }
 static void TestEnsureDeviceActive(void){
   CONST UINT32 Ready[]={0x11,0};
@@ -128,19 +119,21 @@ static void TestEnsureDeviceActive(void){
   }
   ConfigurePower(0x44);assert(EFI_ERROR(EnsureDeviceActive()));
   assert(power_queries==1&&ssu_commands==0&&mPowerMode==0x44);
-  ExpectPowerQuiet();
+  ExpectPowerDiagnostic(" P44");ExpectPowerQuiet();
 
   ConfigurePower(0x22);power_query_fail=1;assert(EFI_ERROR(EnsureDeviceActive()));
   assert(power_queries==1&&ssu_commands==0&&mPowerMode==MAX_UINT32);
+  ExpectPowerDiagnostic(" T36 Rff");ExpectPowerDiagnostic(" Pff");
   ExpectPowerQuiet();
 
   ConfigurePower(0x22);ssu_fail=1;assert(EFI_ERROR(EnsureDeviceActive()));
   assert(power_queries==1&&ssu_commands==1&&mPowerMode==0x22);
+  ExpectPowerDiagnostic("L208 OCS00 T21 R01 S02 K02 A04 Q02 F00 N0 P22");
   ExpectPowerQuiet();
 
   ConfigurePower(0x22);ssu_keep_mode=1;assert(EFI_ERROR(EnsureDeviceActive()));
   assert(power_queries==2&&ssu_commands==1&&mPowerMode==0x22);
-  ExpectPowerQuiet();
+  ExpectPowerDiagnostic(" P22");ExpectPowerQuiet();
 
   ConfigurePower(0x11);pre_power_queries=2;assert(EnsureDeviceActive()==EFI_SUCCESS);
   assert(power_queries==3&&ssu_commands==0&&power_waits==2&&mPowerMode==0x11);
@@ -154,11 +147,12 @@ static void TestEnsureDeviceActive(void){
   ExpectPowerQuiet();
   ConfigurePower(0x22);ssu_unit_attentions=3;assert(EFI_ERROR(EnsureDeviceActive()));
   assert(power_queries==1&&ssu_commands==3&&ssu_unit_attentions==0&&mPowerMode==0x22);
+  ExpectPowerDiagnostic("L208 OCS00 T21 R01 S02 K06 A29 Q00 F00 N0 P22");
   ExpectPowerQuiet();
 
   ConfigurePower(0x22);ssu_response_one_good=1;assert(EFI_ERROR(EnsureDeviceActive()));
   assert(power_queries==1&&ssu_commands==1&&mPowerMode==0x22);
-  ExpectPowerQuiet();
+  ExpectPowerDiagnostic(" R01 S00 Kff Aff Qff");ExpectPowerQuiet();
   ConfigurePower(0x11);
 }
 int main(void){
@@ -178,16 +172,6 @@ int main(void){
   TestEnsureDeviceActive();
   mPowerMode=MAX_UINT32;
   mData.Cpu=data;mData.Bytes=4096;mData.DeviceAddress=0x40002000;mData.Mapped=TRUE;
-  // Reproduce the device result: descriptors succeed while REPORT LUNS
-  // returns NOT READY / INITIALIZING COMMAND REQUIRED until Active.
-  power_mode=0x33;
-  assert(PianoUfsBuildReadDescriptor(trl,1024,ucd,1024,mUcd.DeviceAddress,2,0,0,255)==EFI_SUCCESS);
-  assert(Submit("QUERY_WHILE_POWERDOWN",2,FALSE)==EFI_SUCCESS);
-  assert(ReadLunCapacity()==EFI_DEVICE_ERROR);
-  assert(strcmp(PianoUfsStartupDiagnostic(0),"REPORT LUNS LUN 0 TRY 1 BYTES 0")==0);
-  assert(strcmp(PianoUfsStartupDiagnostic(1),"OCS 00 SCSI 02 SENSE 02 04 02 LEN 18")==0);
-  assert(EnsureDeviceActive()==EFI_SUCCESS && power_mode==0x11);
-  assert(ReadLunCapacity()==EFI_SUCCESS);
   unsigned before=begins;
   assert(ReadScsi("REPORT_LUNS",10,0,PianoUfsReportLuns,0,4096)==EFI_SUCCESS && mTransferred==16);
   assert(begins==before+3 && completes==begins && !mData.Active);
@@ -201,23 +185,15 @@ int main(void){
   assert(ReadScsi("REPORT_LUNS",17,0,PianoUfsReportLuns,0,4096)==EFI_SUCCESS && mTransferred==16);
   assert(read_commands==before+2 && unit_attentions==0 && begins==dma_before+6 && completes==begins);
   assert(!mData.Active && !mUcd.Active && !mTrl.Active && !bell);
+  assert(PianoUfsStartupDiagnostic()==NULL);
   unit_attentions=4;before=read_commands;dma_before=begins;
   assert(ReadScsi("CAPACITY",20,0,PianoUfsReadCapacity16,0,32)==EFI_DEVICE_ERROR);
   assert(read_commands==before+3 && unit_attentions==1 && begins==dma_before+9 && completes==begins);
   assert(!mData.Active && !mUcd.Active && !mTrl.Active && !bell);
+  assert(strcmp(PianoUfsStartupDiagnostic(),"L0 OCS00 T21 R00 S02 K06 A29 Q00 F00 N32 Pff")==0);
+  CONST CHAR8 *FailedStage=mStartupStage;mStartupStage="UFS BLOCKIO";
+  assert(PianoUfsStartupDiagnostic()==NULL);mStartupStage=FailedStage;
   unit_attentions=0;unit_attention_full_residual=0;
-  unit_attentions=0;
-  assert(ReadLunCapacity()==EFI_SUCCESS && mLunCount==1 && mLuns[0].Block==4096);
-  assert(PianoUfsStartupDiagnostic(0)[0]==0 && PianoUfsStartupDiagnostic(2)[0]==0);
-  unit_attentions=3;
-  assert(ReadLunCapacity()==EFI_DEVICE_ERROR);
-  assert(strcmp(PianoUfsStartupDiagnostic(0),"REPORT LUNS LUN 0 TRY 3 BYTES 0")==0);
-  assert(strcmp(PianoUfsStartupDiagnostic(1),"OCS 00 SCSI 02 SENSE 06 29 00 LEN 18")==0);
-  capacity_attentions=3;
-  assert(ReadLunCapacity()==EFI_DEVICE_ERROR);
-  assert(strcmp(PianoUfsStartupDiagnostic(0),"READ CAP16 LUN 0 TRY 3 BYTES 0")==0);
-  assert(strcmp(PianoUfsStartupDiagnostic(1),"OCS 00 SCSI 02 SENSE 06 29 00 LEN 18")==0);
-  assert(ReadLunCapacity()==EFI_SUCCESS && PianoUfsStartupDiagnostic(0)[0]==0);
   bad_ocs=1;PianoUfsBuildNop(trl,1024,ucd,1024,mUcd.DeviceAddress,3);
   assert(Submit("BAD_OCS",3,TRUE)==EFI_DEVICE_ERROR);bad_ocs=0;timeout=1;
   PianoUfsBuildNop(trl,1024,ucd,1024,mUcd.DeviceAddress,4);
