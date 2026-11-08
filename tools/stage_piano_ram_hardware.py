@@ -54,9 +54,12 @@ def build(output, source, rootfs=None):
     if commit != pin or subprocess.check_output(['git', '-C', str(source), 'status', '--porcelain'], text=True):
         raise ValueError('public source must have the pinned clean commit')
     files = {}
+    symlinks = {}
     common = ROOT / 'linux/bsp/common'
     for path in sorted(common.rglob('*')):
-        if path.is_file() and '__pycache__' not in path.parts:
+        if path.is_symlink():
+            symlinks[path.relative_to(common).as_posix()] = str(path.readlink())
+        elif path.is_file() and '__pycache__' not in path.parts:
             files[path.relative_to(common).as_posix()] = path.read_bytes()
     files['usr/lib/piano/piano-adsp-start'] = (ROOT / 'linux/userspace/piano-adsp-start').read_bytes()
     # These remain explicit diagnostics, never boot gates or module loaders.
@@ -72,7 +75,7 @@ def build(output, source, rootfs=None):
         if not rootfs.is_relative_to(ROOT / 'build/distros') or not rootfs.is_dir():
             raise ValueError('stage target must be an existing derived build/distros tree')
         removed = removed_paths(rootfs)
-        for name in (*files, *removed):
+        for name in (*files, *symlinks, *removed):
             safe_destination(rootfs, name)
     output.mkdir(parents=True)
     for name, data in files.items():
@@ -80,9 +83,14 @@ def build(output, source, rootfs=None):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         target.chmod(0o755 if name.startswith('usr/lib/piano/') and not name.endswith('.py') else 0o644)
+    for name, link_target in symlinks.items():
+        target = output / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(link_target)
     subprocess.run(['/bin/sh', '-n', str(output / 'usr/lib/piano/piano-adsp-start')], check=True)
     result = {'status': 'HARDWARE_RUNTIME_STAGED', 'source_commit': commit,
               'files': {name: digest(data) for name, data in files.items()},
+              'symlinks': symlinks,
               'removed_paths': removed, 'driver_loading': 'standard-modalias',
               'device_tested': False, 'global_ready_marker': False, 'register_programming': False}
     (output / 'manifest.json').write_text(json.dumps(result, indent=2) + '\n')
@@ -97,6 +105,12 @@ def build(output, source, rootfs=None):
                 raise ValueError('Refuse writing through a guest symlink: ' + name)
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(output / name, destination)
+        for name, link_target in symlinks.items():
+            destination = safe_destination(rootfs, name)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists() or destination.is_symlink():
+                destination.unlink()
+            destination.symlink_to(link_target)
         wants = rootfs / 'etc/systemd/system/multi-user.target.wants'
         wants.mkdir(parents=True, exist_ok=True)
         link = wants / 'piano-adsp.service'

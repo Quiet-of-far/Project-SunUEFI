@@ -32,6 +32,7 @@ PORTABLE = (
     'tests/unit/test_install_piano.py',
     'tests/unit/test_assemble_rootfs.py',
     'tests/unit/test_arch_niri_rootfs.py',
+    'tests/unit/test_stage_piano_ram_hardware.py',
     'tests/unit/test_bsp_package.py',
 )
 
