@@ -18,9 +18,7 @@ case "$operation" in
   } ;;
 esac
 
-# This checks the installed entry, not a partition name or an arbitrary EFI file.
-# The current core's Linux request selects this path; other ESP entries are not
-# selectable by the request protocol yet. The mount never writes to the ESP.
+# Check the installed boot manager and Linux entry on a read-only mount.
 piano_installed_linux() (
   [ -b /dev/block/by-name/sunuefi_esp ] &&
     [ -b /dev/block/by-name/sunuefi_root ] || exit 1
@@ -29,7 +27,7 @@ piano_installed_linux() (
   trap '[ "$mounted" = false ] || umount "$dir"; rmdir "$dir"' EXIT
   mount -t vfat -o ro,nosuid,nodev,noexec /dev/block/by-name/sunuefi_esp "$dir" 2>/dev/null || exit 2
   mounted=true
-  [ -s "$dir/EFI/Piano/stable/boot.img" ]
+  piano_esp_linux_present "$dir"
 )
 
 piano_quick_status() {
@@ -78,6 +76,10 @@ case "$operation" in
   printf '%s' "$current" | grep -Eq '"target"[[:space:]]*:[[:space:]]*0([,}])' || {
    echo '请先恢复 Android 启动选择。' >&2; exit 2;
   }
+  piano_android_grow_ready || {
+   echo '早期存储维护尚未安装，请更新引导助手模块后继续。' >&2; exit 2;
+  }
+  /system/bin/sh "$MODPATH/storage-operations.sh" finish-expansion --execute >/dev/null
   (sleep 1; /system/bin/reboot) >/dev/null 2>&1 </dev/null &
   echo '{"status":"rebooting"}' ;;
  storage-status)

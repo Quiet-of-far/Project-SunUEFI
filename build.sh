@@ -25,6 +25,52 @@ subprocess.run(['python3','tools/build_piano_full_kernel.py','--worktree',record
  '--build-dir','build/kernels/release','--artifacts','artifacts/kernels/release'],check=True)
 PY_KERNEL
     ;;
+  mesa)
+    # Mesa is a native Debian package build; its Python dependencies come from
+    # APT, not the isolated virtualenv used for UEFI font preparation.
+    env -u VIRTUAL_ENV -u PYTHONHOME -u PYTHONPATH \
+      PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+      bash upstream/piano-mesa-current/scripts/build-mesa-debs.sh \
+      "${1:-$sunuefi_root/build/mesa}" 26.1.6-1~bpo13+1 ;;
+  sensors)
+    python3 - "$sunuefi_root" "${1:-$sunuefi_root/build/sensors}" "${@:2}" <<'PY_SENSORS'
+import hashlib, json, os, shutil, subprocess, sys
+from pathlib import Path
+root, output = (Path(p).resolve() for p in sys.argv[1:3])
+selection = sys.argv[3:]
+if selection not in ([], ['--libssc-only']):
+    raise SystemExit('Usage: ./build.sh sensors [OUTPUT_DIR] [--libssc-only]')
+config = json.loads((root / 'config/release.json').read_text())['sensors']
+if selection and 'patches/piano-sensors/0002-fix-libssc-property-types.patch' not in config['patches']:
+    raise SystemExit('Select the libssc property-type patch in sensors.patches before building libssc-only.')
+source = root / config['source']
+head = subprocess.check_output(['git', '-C', source, 'rev-parse', 'HEAD'], text=True).strip()
+dirty = subprocess.check_output(['git', '-C', source, 'status', '--porcelain'], text=True)
+if head != config['commit'] or dirty:
+    raise SystemExit('Sensors source HEAD/cleanliness mismatch; run ./build.sh sources.')
+workspace = root / 'build/sensors-workspace'
+if workspace.exists():
+    shutil.rmtree(workspace)
+shutil.copytree(source, workspace, ignore=shutil.ignore_patterns('.git'))
+patches = []
+for name in config['patches']:
+    patch = root / name
+    patches.append({'path': name, 'sha256': hashlib.sha256(patch.read_bytes()).hexdigest()})
+    subprocess.run(['patch', '--batch', '--forward', '-p1', '-i', patch], cwd=workspace, check=True)
+record = {'source_url': config['source_url'], 'source_commit': head, 'patches': patches}
+(workspace / 'SOURCE').write_text(json.dumps(record, indent=2) + '\n')
+# Native Debian package tools must see their APT-installed Python modules.
+# Keep the caller's virtualenv for UEFI and only isolate this child build.
+build_env = os.environ.copy()
+for name in ('VIRTUAL_ENV', 'PYTHONHOME', 'PYTHONPATH'):
+    build_env.pop(name, None)
+build_env['PATH'] = '/usr/sbin:/usr/bin:/sbin:/bin'
+subprocess.run(['bash', workspace / 'scripts/build-sensors-debs.sh', output, *selection],
+               env=build_env, check=True)
+shutil.copy2(workspace / 'SOURCE', output / 'SOURCE')
+PY_SENSORS
+    ;;
+  display-calibration) python3 tools/display/build_output_color.py "$@" ;;
   bsp)
     python3 tools/package_bsp.py "$@" ;;
   rootfs)
@@ -61,7 +107,7 @@ PY_PACKAGE
   install) python3 tools/install_piano.py "$@" ;;
   installer) python3 tools/export_installer.py "$@" ;;
   help|-h|--help)
-    printf '%s\n' 'Usage: ./build.sh sources|check|uefi|trampoline|module|module-package|boot-request|boot-repack|linux|bsp|rootfs|arch-niri-rootfs|package|all|installer|install' \
+    printf '%s\n' 'Usage: ./build.sh sources|check|uefi|trampoline|module|module-package|boot-request|boot-repack|linux|mesa|sensors|display-calibration|bsp|rootfs|arch-niri-rootfs|package|all|installer|install' \
       'Full builds need the documented builder environment; rootfs and hardware packages run in a root ARM64 build container.' \
       'Building never partitions or flashes a tablet. install is a separate explicit command.' ;;
   *) printf 'Unknown command: %s\n' "$command" >&2; exit 2 ;;

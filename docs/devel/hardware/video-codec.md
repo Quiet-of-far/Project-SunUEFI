@@ -8,7 +8,7 @@
 | 系统 | FFmpeg | 构建入口 |
 | --- | --- | --- |
 | Debian GNOME / KDE | 7.1.5，保留 Debian 打包配置 | `tools/build_ffmpeg_packages.py` |
-| SteamOS | 7.1.5，兼容其原有 7.x 库接口 | `tools/build_arch_ffmpeg.py` |
+| SteamOS | 8.1.1，保持 Valve 8.x 库接口和编译选项 | `tools/build_arch_ffmpeg.py` |
 | Nyarch | 9.0.2，保持当前 Arch 库接口 | `tools/build_arch_ffmpeg.py` |
 
 Arch 构建器读取目标系统已安装包的编译选项、依赖和版本信息，保留完整编解码功能，
@@ -20,12 +20,15 @@ Arch 构建器读取目标系统已安装包的编译选项、依赖和版本信
 ```sh
 python tools/prepare_ffmpeg_source.py --output build/ffmpeg-source-7
 python tools/prepare_ffmpeg_source.py \
-  --series linux/bsp/patches/ffmpeg/series-9.json \
+  --series patches/ffmpeg/9.0.2/series.json \
   --output build/ffmpeg-source-9
 ```
 
 源码归档及补丁固定 SHA256，补丁禁止模糊匹配，不修改 `upstream/`。
-FFmpeg 7 使用固定的 Debian orig 归档；FFmpeg 9 使用官方 9.0.2 归档。
+FFmpeg 7 使用固定的 Debian orig 归档；FFmpeg 8 和 9 分别使用官方 8.1.1、9.0.2 归档。
+
+SteamOS 和 Nyarch 的包缓存同时核对版本、补丁系列与二进制包哈希。
+修改系列后重新构建完整包；复用缓存时重新安装该包，不保留被基础软件源替换的版本。
 
 ## 解码流程修正
 
@@ -57,11 +60,17 @@ FFmpeg 7 的适配和 Nyarch 完整 FFmpeg 9 软件包，均已在 Iris 硬件�
    ERROR 时跳过 LAST 状态更新。随后新队列又收到一次 LAST，使播放器提前结束。
    内核补丁修正了空 PSC_LAST 的判断，并让带错误的最后一帧也正确结束旧队列。
 
-FFmpeg 缓冲区补丁与内核 `0046-media-iris-psc-last.patch` 均已纳入默认构建。
+FFmpeg 缓冲区补丁与 Iris 的 PSC_LAST 修正均已纳入默认构建；内核改动收在
+[`0004-media.patch`](../../../patches/linux/7.3/0004-media.patch) 中。
 FFmpeg 7 和 9 在实机完成 640×480 → 1280×720 → 640×480 的连续切换，
 36 帧全部解码、零解码错误，两版也各完成 12 帧 H.264 硬件编码。
 
-`0047-media-iris-deinit-irq-lock.patch` 在取得核心锁之前先等待中断线程结束，
+SteamOS 的完整 FFmpeg 8.1.1 包复用同一份 NV12 行复制、序列头合并和未启动编码器
+退出修正。输入帧只提供可见高度，驱动的对齐高度仅用于目标缓冲区布局，
+不能按后者读取源图像。实机已完成 1280×720 的 30 帧 H.264 编码和全部 30 帧硬解。
+裸码流的帧数检查使用 `-fps_mode passthrough`，避免输出同步策略丢弃时间戳相同的画面。
+
+同一内核补丁在取得核心锁之前先等待中断线程结束，
 修复实机发现的驱动退出死锁。设备已完成模块卸载、重新加载和正常重启。
 
 后续验证必须确认完整输出切换前后的全部帧，不能仅看进程退出码。其他编码格式、

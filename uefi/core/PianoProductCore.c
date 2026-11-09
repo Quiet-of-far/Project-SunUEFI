@@ -12,6 +12,8 @@
 #include "PianoProductSmem.h"
 #include "PianoReset.h"
 #include "PianoNvFile.h"
+#include "PianoBluetoothAddress.h"
+#include "PianoRtcOffset.h"
 #include "PianoProductBootObjects.h"
 #include "PianoProductMemory.h"
 #include "PianoProductBootLog.h"
@@ -181,6 +183,7 @@ STATIC EFI_STATUS ProductDebugReplay(VOID *Context) {
   PianoProductMemoryReemitDiagnostic();
   PianoLateHandoffReemitDiagnostic(&mLateHandoff);
   PianoTouchReplay();
+  PianoPogoReplay();
   if(PianoProductDisplayRetained())return Display==EFI_SUCCESS?EFI_COMPROMISED_DATA:Display;
   if(PianoDisplaySmmuRetained())return Translation==EFI_SUCCESS?EFI_COMPROMISED_DATA:Translation;
   if(PianoFrameBufferMappingRetained())return CpuMapping==EFI_SUCCESS?EFI_COMPROMISED_DATA:CpuMapping;
@@ -513,6 +516,8 @@ EFI_STATUS EFIAPI PianoProductCoreEntry(EFI_HANDLE Image,EFI_SYSTEM_TABLE *Syste
   mBootLogStage="UFS";
   Status=PianoNvFileStart();
   DEBUG((DEBUG_WARN,"PIANO_NV_FILE_BACKEND status=%r\n",Status));
+  (VOID)PianoBluetoothAddressInitialize();
+  (VOID)PianoRtcOffsetInitialize();
   Status=PianoFastbootBlockReadInit();if(Status!=EFI_SUCCESS)FailStop(Status);
   CONST PIANO_FB_STORAGE *Storage=PianoFastbootBlockReadStorage();
   if(Storage==NULL || Storage->Ready(Storage->Context)!=EFI_SUCCESS)FailStop(EFI_NOT_READY);

@@ -4,13 +4,31 @@
 
 **标准笔输入已能绘画，位置正确，线宽随压力变化。** 当前结果来自本机 120 Hz 冷启动环境，Linux 已收到 Report5 压力和屏幕 type29 矩阵。144 Hz 下的笔输入尚未确认；轻捏按键、重连后的反馈参数和画板笔光标已写入默认源码；新版本仍需实机确认。轻捏、双击笔身和笔身滑动见[笔身手势](#笔身手势)。
 
+## 普通 Focus Pen
+
+普通 Xiaomi Focus Pen（M80p，蓝牙 `0022:4d80`）与 Focus Pen Pro（P81c，
+`0022:5081`）共用单个 THP 读取进程。连接后按真实 HID 身份切换扫描模式、
+校准和输入设备：普通笔使用模式 1、压力范围 0..8191，Pro 使用模式 3、
+压力范围 0..16383。切换型号前释放旧工具，重新创建具有正确压力范围的
+标准 tablet-tool；断连与数据超时仍释放接触状态。
+
+普通笔已确认悬停、定位和压感书写，刷新率限制见[已知问题](../../../docs/user/known-issues.md#触控笔)。
+BOE/CSOT 配置保留同机原厂 vendor1 的坐标差值与倾角校准，不使用 Sheng
+的屏幕映射或校准常数。`piano-pen-offline --vendor 1` 可检查这组参数；
+默认 `--vendor 3` 保持 Pro 的离线接口。
+
+普通笔的 Report2 `0x4e`／`0x4b` 分别映射为 `BTN_STYLUS`／`BTN_STYLUS2`，
+仅在笔位于感应范围内上报。内核 HID 修正阻止它们同时作为全局翻页键，
+保留独立焦点键和原始 hidraw 压力数据。普通笔不会收到 Pro 的轻捏、
+振动或无线配置命令。
+
 ## 开源实现
 
 `piano-pen-decoder.hpp/.cpp` 派生自 `ianchb/xiaomi-sheng-thp` 固定提交 `34046210932d654a4c0df0121ecc31c008f8148c`，保留 Apache-2.0 许可。`piano-pen-core.h/.cpp` 提供 C 接口，让现有的触控读取进程可以调用它。来源与修改范围见 [OPEN_CORE_ORIGIN.txt](OPEN_CORE_ORIGIN.txt)，完整许可见 [Apache-2.0.txt](Apache-2.0.txt)。
 
 核心接收去掉 stream header 和 257 字节 transport 的原始 payload，复用 `piano-pen-frame.c` 的两层原始校验和、几何检查与四分包位图。只有四份主触摸数据齐全才标记完整；type17 不会改成 type29。矩阵经过轴分离、坐标计算、倾角校正与滤波后，返回带有效位的结果。未知压力、坐标或倾角不能补零上报。
 
-校准从调用者提供的原厂 ini 读取，没有内嵌 Sheng 的位置表或尺寸。Piano 的 40/60 轴从两个 2400 点 mapping 抽取，pitch 按原厂整数公式计算。P81c 的 vendor3 选择默认 `stylus` 参数，不是 `stylus_3` 槽。输出声明为 portrait：X `0..213599`、Y `0..319999`、压力 `0..16383`、倾角 ±60；不额外交换坐标，也不除以 report factor10。
+校准从调用者提供的原厂 ini 读取，没有内嵌 Sheng 的位置表或尺寸。Piano 的 40/60 轴从两个 2400 点 mapping 抽取，pitch 按原厂整数公式计算。P81c 的 vendor3 选择默认 `stylus` 参数，不是 `stylus_3` 槽。输出声明为 portrait：X `0..213599`、Y `0..319999`、压力范围按笔型号选择、倾角 ±60；不额外交换坐标，也不除以 report factor10。
 
 **Touch 校准必须按触控 LCDid／固件选择，不能按 Display 面板名称选择。** 当前设备触控 LCDid 为1，使用 BOE 触控固件及 BOE ini，即使显示链路标识为 CSOT。两份 ini 的位置表不同，必须分别保留。
 
@@ -42,6 +60,11 @@ piano-touch-view input --seconds 0 \
 100ms是调用者选择的有效期，不能称为原厂参数。可加 `--pen-json` 输出诊断；未知压力不伪造为0，退出、流中断和 epoch改变会释放工具与按键状态。输入保持压力0..16383，横向坐标由 portrait输出转换为 `X=portraitY`、`Y=213599-portraitX`，倾角同步转换。已有实机确认的位置与线宽变化来自这条标准输入路径。
 
 该路径不设置笔扫描或显示模式。启动时的校准选择与无线／磁吸状态仍由现有硬件启动逻辑协调，不能仅凭程序编译成功就忽略这些条件。
+
+KDE 按 `/devices/virtual/` 路径识别 uinput，所以数位板页面会显示用户空间驱动提醒，
+不会禁用配置。笔通过标准 libinput／tablet-tool 交给 KWin，压力曲线与显示映射仍
+使用桌面设置，不在解算进程另设一套曲线。设备上的压力曲线修改已写入标准
+`kcminputrc` 并可恢复；不改总线类型或伪造硬件路径来隐藏该提醒。
 
 掌压识别在同一程序的手指解码中完成，见 [`piano-touch-view-palm-rejection.patch`](../../../tools/patches/piano-touch-view-palm-rejection.patch)。每个触点取峰值周围连通且不低于触摸阈值（默认 200）的格子，格子数达到 `PALM_AREA_CELLS`（70）的触点上报为 `MT_TOOL_PALM`，同一片手掌只占一个触点，抬起前不会变回手指，也不按下 `BTN_TOUCH`；libinput 不把它交给应用，手指变成手掌时取消已开始的触摸。70 取自原厂触控配置 `/odm/firmware/piano_nova_boe_thp_config.ini`（CSOT 版本取值相同）的 `palm_area_num_level2`。原厂按同样的 60×40 感应矩阵计数，每格约 16 mm²，70 格约 1140 mm²，相当于直径 38 mm 的圆。原厂同组还有 `palm_neg_area_num_level2=30`（负值格子数）和更大的 `palm_area_num_level1=110`；这里不统计负值格子，只用 70 格。按格子数判断，两指并拢时连成的细长区域仍是两根手指。触点大小按椭圆估算长短轴，以 `ABS_MT_TOUCH_MAJOR`／`ABS_MT_TOUCH_MINOR` 上报，单位是 13／mm（面板 239×163 mm）。type29 笔帧到来时仍按着的触点以手掌方式抬起，先落下的手不会在笔靠近时变成一次点击。BSP 的 `79-piano-pen-touch-group.rules` 把触屏和笔放进同一个 libinput 设备组，笔在感应范围内时，libinput 自带的触控仲裁忽略笔旁的新触摸。在平板上调整时，用 `evtest` 查看手指和手掌的 `ABS_MT_TOUCH_MAJOR`、`ABS_MT_TOUCH_MINOR` 与 `ABS_MT_TOOL_TYPE`，长短轴相乘再除以 3500 约等于格子数，据此调整补丁中的 `PALM_AREA_CELLS`。
 
@@ -81,7 +104,7 @@ P81C 的 137 字节 HID Report Map 将私有 Report5 数据放在键盘 Usage Pa
 
 `piano-touch-input` 在现有触控服务中启动 `pen-bluetooth --follow` 伴随进程。它只走 BlueZ，不读取 THP、也不生成键鼠输入；连接和 `ServicesResolved` 后完成初始化，断连后等待下一次连接重新发送反馈参数。磁吸状态只在开关存在时转发；没有磁吸／静止接口不阻塞已知的 BLE 功能。它支持当前笔返回的设备版本，不把 Modalias 硬锁到旧 `d0001`。`DA 01 01` 说明反馈设置被接收，物理震动仍需要轻捏确认。
 
-断连时，伴随进程从 BlueZ 枚举已开启的适配器，尝试连接已配对、受信任的 P81C。SC96231 内核驱动从磁吸链路提供笔的准确地址后，程序优先使用该地址；BlueZ 报告认证失败时，只清除这支笔失效的配对并通过标准 Agent1／Device1 接口重新配对。配对代理不成为系统默认代理，不接受其他设备。原厂 Android 与 Linux 交替使用后，已完成自动删除旧配对、重新配对、恢复 GATT 控制服务和初始化。
+断连时，伴随进程从 BlueZ 枚举已开启的适配器，尝试连接已配对、受信任的 Focus Pen 或 Pro。SC96231 内核驱动从磁吸链路提供笔的准确地址后，程序优先使用该地址；BlueZ 报告认证失败时，只清除这支笔失效的配对并通过标准 Agent1／Device1 接口重新配对。配对代理不成为系统默认代理，不接受其他设备。原厂 Android 与 Linux 交替使用后，已完成自动删除旧配对、重新配对、恢复 GATT 控制服务和初始化。
 
 扫描每次持续 30 秒，随后间隔 90 秒；磁吸状态变化提前重试，设备连接和服务出现由 D-Bus 事件立即处理。程序不会开启用户关闭的蓝牙，也不会终止其他程序的扫描。磁吸供电、地址和电量读取由内核 `sc96231` 与 MCA regulator 完成，不依赖用户空间 GPIO 或 I²C 命令。
 
@@ -100,7 +123,7 @@ P81C 的 137 字节 HID Report Map 将私有 Report5 数据放在键盘 Usage Pa
 | `02 61`、`02 00` | 上滑 | 笔键盘节点的 `KEY_PAGEUP` | 阅读与办公应用收到 Page Up，短视频应用切到上一条 |
 | `02 5b`、`02 00` | 下滑 | 笔键盘节点的 `KEY_PAGEDOWN` | 阅读与办公应用收到 Page Down，短视频应用切到下一条 |
 
-滑动由内核 `hid-xiaomi` 的 [`0025` 补丁](../../../patches/linux/7.3/0025-hid-xiaomi-p81c-body-gestures.patch)直接映射为 Page Up／Page Down，发给当前窗口，与键盘上的翻页键相同；它不依赖这里的程序，其他发行版使用同一内核也能得到。通用 HID 原本会把双击和滑动变成小键盘回车、`9` 和 `3`，补丁去掉了这些映射，也不再发送轻捏的 F19。
+滑动由内核 `hid-xiaomi` 的 [`0029` 补丁](../../../patches/linux/7.3/0029-hid-xiaomi-p81c-body-gestures.patch)直接映射为 Page Up／Page Down，发给当前窗口，与键盘上的翻页键相同；它不依赖这里的程序，其他发行版使用同一内核也能得到。通用 HID 原本会把双击和滑动变成小键盘回车、`9` 和 `3`，补丁去掉了这些映射，也不再发送轻捏的 F19。
 
 轻捏和双击由同一触控进程读取 hidraw，作为笔按钮发给 tablet-tool 节点，只在笔处于感应范围内时上报；抬出范围、断连、流中断时释放按钮。设置 `PIANO_PEN_SQUEEZE_ACTION=stylus` 时轻捏始终作为 `BTN_STYLUS`。不支持笔的应用通常把 `BTN_STYLUS` 当作中键、`BTN_STYLUS2` 当作右键；绘图应用可以把两个按钮绑定到橡皮擦、取色等工具。双击或滑动打断仍按住的轻捏时，轻捏结束但不算一次点击。
 

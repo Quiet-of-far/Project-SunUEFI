@@ -44,10 +44,15 @@ def inputs(root,profile):
         pump_record=pump(root,apply=False);ui_record=ui(root,apply=False)
         files.update(root/path for path in (*pump_record['files'],*ui_record['files']))
         files.update(root/path for path in nv_guard(root,apply=False)['files'])
-        from prepare_product import SOURCE_NAMES, os_boot_files, verify_os_boot, observation_files, verify_observation_families,verify_display_mapping,early_dxe_files
+        from prepare_product import (SOURCE_NAMES, PRODUCT_COMPONENTS, os_boot_files,
+                                     verify_os_boot, observation_files,
+                                     verify_observation_families, verify_display_mapping,
+                                     early_dxe_files)
         files.update(early_dxe_files(root))
         canonical=root/'uefi/core'
         files.update(canonical/name for name in SOURCE_NAMES)
+        files.update(root/'uefi/components'/component/name
+                     for component,names in PRODUCT_COMPONENTS.items() for name in names)
         files.update(path for path in canonical.iterdir() if path.is_file() and path.suffix in ('.h','.inc'))
         files.update(os_boot_files(root).values())
         prepared=json.loads((root/'build/product/prepared-manifest.json').read_text());os_boot=prepared.get('os_boot',{})
@@ -75,7 +80,7 @@ def inputs(root,profile):
             files.add(path)
         for target in (platform,root/'uefi/platforms/pianoProductPkg'):
             verify_provider(root,target/'Applications/ProductCore',prepared.get('late_provider',{}))
-        for folder in ('uefi/components/product-pump','uefi/components/product-support','uefi/components/product-handoff','uefi/components/ext4','uefi/components/simple-init','uefi/components/nv','uefi/components/reset','uefi/components/usb-host','uefi/components/pogo-product','uefi/components/touch-product'):
+        for folder in ('uefi/components/product-pump','uefi/components/product-support','uefi/components/product-handoff','uefi/components/board-identity','uefi/components/ext4','uefi/components/simple-init','uefi/components/nv','uefi/components/reset','uefi/components/usb-host','uefi/components/pogo-product','uefi/components/touch-product'):
             files.update(path for path in (root/folder).rglob('*') if path.is_file())
         for relative in ('config/piano-product.json','build/product/prepared-manifest.json',
                          'tools/prepare_product.py','tools/build_product.sh','tools/firmware_workspace.py','tools/package_product.py',

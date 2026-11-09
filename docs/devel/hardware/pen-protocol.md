@@ -1,8 +1,15 @@
 # Piano 触控笔协议与原厂算法
 
-更新：2026-10-25。默认 120 Hz，定位、压感绘画、144 Hz 笔输入、轻捏、震动和磁吸连接恢复可用，首次连接延迟已解决。掌压按接触面积识别并与笔同组交给 libinput 仲裁，阈值仍需用真实手掌数据调整，见[笔目录说明](../../../linux/userspace/pen/README.md)；轻捏、双击和笔身滑动的格式与 Linux 输出见[笔身手势](#笔身手势)。
+默认 120 Hz。Focus Pen Pro 支持定位、压感绘画、144 Hz 笔输入、轻捏、震动和磁吸连接恢复；普通 Focus Pen 的刷新率范围见下文。掌压按接触面积识别并与笔同组交给 libinput 仲裁，阈值仍需用真实手掌数据调整，见[笔目录说明](../../../linux/userspace/pen/README.md)；轻捏、双击和笔身滑动的格式与 Linux 输出见[笔身手势](#笔身手势)。
 
 下文保留移植过程的协议记录。原厂依据来自同版本 `OS3.0.309.0.WPYCNXM` ROM 的触控 HAL、公开驱动和操作采集。
+
+## 普通 Focus Pen（M80p）
+
+普通笔使用蓝牙 `0022:4d80`，扫描模式 1，压力范围 0..8191。
+普通笔已通过悬停、定位和线宽随压力变化验证，刷新率限制见
+[已知问题](../../user/known-issues.md#触控笔)。型号切换、校准来源和按键路由见
+[普通 Focus Pen](../../../linux/userspace/pen/README.md#普通-focus-pen)。
 
 ## 屏幕数据与 BLE 分开处理
 
@@ -262,7 +269,7 @@ Linux之前显示144Hz、hand180、pen240。两边笔扫描率相同；这一次
 | 双击 | tablet-tool 节点的 `BTN_STYLUS2` 按下、抬起，仅在笔处于感应范围时 | `piano-pen-owner.c` |
 | 轻捏 | 短按是笔尖位置的一次点击，按住 600 ms 以上是 `BTN_STYLUS`，仅在感应范围时 | `piano-pen-owner.c` |
 
-内核补丁 [`0025-hid-xiaomi-p81c-body-gestures.patch`](../../../patches/linux/7.3/0025-hid-xiaomi-p81c-body-gestures.patch) 在 `xiaomi_input_mapping` 中按 Report ID、字段长度和逻辑范围识别 Report2，把 `0x61`、`0x5B` 映射为 `KEY_PAGEUP`、`KEY_PAGEDOWN`，忽略 `0x6E`、`0x58` 和笔从不发送的其余用法。滑动因此不依赖本项目的用户空间程序，换用其他发行版时仍是 Page Up／Page Down；双击不再变成回车，滑动也不随 Num Lock 输出数字。原始 Report2 仍经 hidraw 交给触控进程中的笔输入。
+内核补丁 [`0029-hid-xiaomi-p81c-body-gestures.patch`](../../../patches/linux/7.3/0029-hid-xiaomi-p81c-body-gestures.patch) 在 `xiaomi_input_mapping` 中按 Report ID、字段长度和逻辑范围识别 Report2，把 `0x61`、`0x5B` 映射为 `KEY_PAGEUP`、`KEY_PAGEDOWN`，忽略 `0x6E`、`0x58` 和笔从不发送的其余用法。滑动因此不依赖本项目的用户空间程序，换用其他发行版时仍是 Page Up／Page Down；双击不再变成回车，滑动也不随 Num Lock 输出数字。原始 Report2 仍经 hidraw 交给触控进程中的笔输入。
 
 双击是笔的第二个按钮。tablet-tool 节点上的按钮必须有笔的位置，笔离开感应范围时双击不产生输入。按 Linux 笔输入的惯例，不支持笔的应用通常把 `BTN_STYLUS` 当作中键、`BTN_STYLUS2` 当作右键；Krita、Xournal++ 等绘图应用可以把它绑定到橡皮擦或其他工具。一个新手势替换仍按住的轻捏时，按 HID 数组语义结束轻捏，但不把被打断的轻捏当作一次点击。
 

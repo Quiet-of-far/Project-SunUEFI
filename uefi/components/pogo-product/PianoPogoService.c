@@ -159,7 +159,7 @@ STATIC VOID BringUp(UINT64 Now) {
   }
   if(mPogo.Step==StepStopped)return;
   if(S!=EFI_SUCCESS){Unavailable(Reason,S);return;}
-  mPogo.Step=Next;mPogo.NextUs=Now+Wait;
+  mPogo.Step=Next;mPogo.NextUs=NowUs()+Wait;
 }
 
 STATIC EFI_STATUS EFIAPI BackendReady(VOID *Context) {
@@ -265,6 +265,14 @@ VOID PianoPogoPump(VOID) {
   // A retire that ran inside the input producer could not stop it there
   if(mPogo.Step==StepStopped && mPogo.DxeStarted && !mPogo.DxeStopped){mPogo.DxeStatus=PianoPogoDxeStop(&mDxe);mPogo.DxeStopped=mPogo.DxeStatus!=EFI_NOT_READY;}
   mPogo.Busy=FALSE;
+}
+
+VOID PianoPogoReplay(VOID) {
+  CONST PIANO_POGO_DXE_REPORT *Dxe=PianoPogoDxeReport(&mDxe);
+  CONST PIANO_POGO_INPUT *Input=&mDxe.Adapter.Core;
+  DEBUG((DEBUG_WARN,"PIANO_POGO_INPUT step=%a attached=%u known=%u frames=%u reads=%u empty=%u read_errors=%u commands=%u command_errors=%u irq_seen=%u accepted=%u rejected=%u keys=%u pointer=%u status=%r work=%u\n",
+    mStepNames[mPogo.Step],mPogo.Attached,Input->AttachKnown,mPogo.Frames,mPogo.Reads,mPogo.Empty,mPogo.ReadErrors,mPogo.Commands,mPogo.CommandErrors,
+    mPogo.Board.EdgeSeen,Input->AcceptedFrames,Input->RejectedFrames,(UINT32)Input->KeyCount,Input->RelativePending,Dxe?Dxe->Status:mPogo.DxeStatus,Dxe?Dxe->WorkPending:0));
 }
 
 EFI_STATUS PianoPogoStop(VOID *Context,PIANO_PRODUCT_INPUT_RETIRE_REPORT *Report) {

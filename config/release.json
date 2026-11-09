@@ -8,13 +8,15 @@
     "stable_commit": "d50d994bffa3c7c6db2d8bc4c5f0c55e3f46b0cd",
     "stable_version": "7.3.3",
     "uapi_sha256": "5638464826c36018483e2c06f260c1bc439fc6f66b584f56c1e76ec8846c37e5",
-    "target_tree": "28268dab4f5ce0ced78ed8d7d26d77c782a92fb6",
+    "target_tree": "8aec2afab2331f9e5e1ba45c5b4956b3b7148bea",
     "cpu_model_overlay": "linux/dts/piano-cpu-model.dtso",
     "additional_dtb_overlays": [
       "linux/dts/piano-cma.dtso",
       "linux/dts/piano-pcie-interrupt-map.dtso",
+      "linux/dts/piano-pcie-clocks.dtso",
       "linux/dts/piano-usb-typec.dtso",
       "linux/dts/piano-displayport.dtso",
+      "linux/dts/piano-battery.dtso",
       "linux/dts/piano-ufs-mcq.dtso",
       "linux/dts/piano-dsp-resources.dtso",
       "linux/dts/piano-cdsp-fastrpc.dtso",
@@ -22,13 +24,15 @@
       "linux/dts/piano-board-identity.dtso",
       "linux/dts/piano-regdma-resource.dtso",
       "linux/dts/piano-audio-dmic-clock.dtso",
+      "linux/dts/piano-camera-sensors.dtso",
       "linux/dts/piano-camera-flash.dtso",
       "linux/dts/piano-camera-privacy-led.dtso",
       "linux/dts/piano-touch-panel.dtso",
       "linux/dts/piano-pen-dock.dtso",
       "linux/dts/piano-pen-charger.dtso",
       "linux/dts/piano-bluetooth-nvm.dtso",
-      "linux/dts/piano-ir-spi-controller.dtso"
+      "linux/dts/piano-ir-spi-controller.dtso",
+      "linux/dts/piano-display-interconnects.dtso"
     ],
     "root_policy": "LABEL=PIANOROOT",
     "preferred_display_mode": {
@@ -52,7 +56,8 @@
     "overlays": [
       "vendor/firmware/hyperos4-adsp/manifest.json",
       "vendor/firmware/hyperos4-cdsp/manifest.json",
-      "vendor/firmware/hyperos4-fingerprint/manifest.json"
+      "vendor/firmware/hyperos4-fingerprint/manifest.json",
+      "vendor/firmware/piano-display/manifest.json"
     ]
   },
   "mesa": {
@@ -89,5 +94,9 @@
     "autologin": true,
     "password": "piano123456"
   },
-  "reproducibility": "source identities and actual package/metadata hashes recorded; complete bit reproducibility is not claimed"
+  "reproducibility": "source identities and actual package/metadata hashes recorded; complete bit reproducibility is not claimed",
+  "audio_topology": {
+    "source": "linux/bsp/topology/piano-displayport.m4",
+    "sha256": "6bedef2e832a24fccf978340ceb1724a32e045c92243dd0e1d152b289e59c6f6"
+  }
 }

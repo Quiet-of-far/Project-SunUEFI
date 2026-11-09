@@ -97,8 +97,8 @@ body { padding-bottom:calc(86px + env(safe-area-inset-bottom)); }
 .partition strong { display:block; font-size:25px; font-weight:550; margin:0 0 8px; }
 .partition p { font-size:13px; color:var(--muted); margin:0; }
 .storage-card .hint { margin-top:0; }
-.sizes { display:flex; gap:9px; margin-bottom:18px; }
-.sizes button { flex:1; min-height:48px; padding:10px; border-radius:17px; color:#515761; background:#f2f3f5; border:1px solid transparent; }
+.sizes { display:flex; flex-wrap:wrap; gap:9px; margin-bottom:18px; }
+.sizes button { flex:1 1 64px; min-height:48px; padding:10px 6px; white-space:nowrap; border-radius:17px; color:#515761; background:#f2f3f5; border:1px solid transparent; }
 .sizes button[aria-pressed="true"] { color:#1a695b; background:#e7f3ef; border-color:#a8cdbf; }
 .storage-actions { display:flex; gap:12px; }
 .storage-actions button { flex:1; min-height:52px; border-radius:18px; background:#f0f3f2; color:#386b60; font-size:16px; }
@@ -128,6 +128,10 @@ body.working #message { position:fixed; z-index:20; bottom:22px; left:50%; trans
 .image-choice strong { font-size:16px; font-weight:500; }
 .image-choice p { font-size:13px; color:var(--muted); margin:7px 0 0; overflow-wrap:anywhere; }
 .image-choice .quiet { flex-shrink:0; }
+.image-update { display:flex; align-items:center; gap:10px; min-height:48px; width:max-content; max-width:100%; margin-top:4px; color:#386b60; font-size:14px; cursor:pointer; touch-action:manipulation; }
+.image-update input { width:22px; height:22px; margin:0; accent-color:var(--accent); cursor:inherit; }
+.image-update input:focus-visible { outline:3px solid #92c7c1; outline-offset:3px; }
+.image-update input:disabled + span { opacity:.55; }
 .partition-tools .tool { border-radius:18px; padding:18px 14px; }
 .partition-tools .tool:disabled { opacity:.7; }
 .partition-tools .tool:disabled .chevron { display:none; }

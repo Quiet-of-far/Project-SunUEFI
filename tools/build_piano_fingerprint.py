@@ -5,10 +5,21 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import shlex
 
 ROOT = Path(__file__).resolve().parents[1]
-CLIENT = ROOT / 'linux/userspace/fingerprint'
-CLIENT_SOURCES = [CLIENT / 'piano-goodix-protocol.c', CLIENT / 'piano-goodix.c']
+NATIVE = ROOT / 'linux/userspace/fingerprint'
+CORE_SOURCES = (
+    'piano-goodix-storage.c', 'piano-goodix-events.c',
+    'piano-goodix-gatekeeper.c', 'piano-goodix-operations.c',
+    'piano-goodix-rpmb.c', 'piano-goodix.c',
+)
+HEADERS = (
+    'piano-goodix-storage.h', 'piano-goodix-events.h',
+    'piano-goodix-gatekeeper.h', 'piano-goodix-operations.h',
+    'piano-goodix-rpmb.h', 'piano-goodix.h',
+)
+CLI_SOURCE = NATIVE / 'piano-goodix-cli.c'
 RUNTIME_PATHS = {
     'usr/local/sbin/piano-fingerprint-ctl',
     'usr/share/piano-provenance/fingerprint.json',
@@ -20,14 +31,34 @@ RUNTIME_PATHS = {
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
+
+def patches(record):
+    if 'patch_series' not in record:
+        return []
+    series = ROOT / record['patch_series']
+    return [(series.parent / entry['file'], entry['sha256'])
+            for entry in json.loads(series.read_text())['patches']]
+
+
 def source_inputs():
+    sources = json.loads((ROOT / 'config/fingerprint.json').read_text())['sources']
+    patch_inputs = {}
+    for record in sources.values():
+        if 'patch_series' in record:
+            series = ROOT / record['patch_series']
+            patch_inputs[record['patch_series']] = digest(series)
+        for path, expected in patches(record):
+            if digest(path) != expected:
+                raise ValueError('Fingerprint patch checksum differs: ' + str(path))
+            patch_inputs[str(path.relative_to(ROOT))] = expected
     return {
         'config_sha256': digest(ROOT / 'config/fingerprint.json'),
-        'client_sources_sha256': {path.name: digest(path) for path in
-                                  [*CLIENT_SOURCES, CLIENT / 'piano-goodix-protocol.h']},
+        'native_sources': {name: digest(NATIVE / name)
+                           for name in (*CORE_SOURCES, *HEADERS, CLI_SOURCE.name)},
         'builder_sha256': digest(Path(__file__)),
         'firmware_manifest_sha256': digest(
             ROOT / 'vendor/firmware/hyperos4-fingerprint/manifest.json'),
+        'patches': patch_inputs,
     }
 
 
@@ -55,9 +86,27 @@ def build(output, flags, emulator=None):
     cfg = json.loads((ROOT / 'config/fingerprint.json').read_text())
     dependencies = {name: source(name, record)
                     for name, record in cfg['sources'].items()}
+    work = output / 'fingerprint'
+    work.mkdir()
+    for name, record in cfg['sources'].items():
+        if not patches(record):
+            continue
+        # Extract the fixed upstream commit; apply changes only in the build tree.
+        destination, archive = work / name, work / (name + '.tar')
+        destination.mkdir()
+        subprocess.run(['git', '-C', dependencies[name], 'archive', '--format=tar',
+                        '--output=' + str(archive.resolve()), record['commit']], check=True)
+        subprocess.run(['tar', '-xf', archive, '-C', destination], check=True)
+        archive.unlink()
+        for path, _expected in patches(record):
+            subprocess.run(['patch', '--batch', '--fuzz=0', '-p1', '-i', path],
+                           cwd=destination, check=True)
+        dependencies[name] = destination
     qtee, mink, qcbor = (dependencies[name] for name in ('quic-teec', 'minkipc', 'qcbor'))
     includes = [qtee / 'libqcomtee/include', qtee / 'libqcomtee/src',
                 mink / 'libminkadaptor/include', mink / 'libminkadaptor/src',
+                mink / 'listeners/libfsservice/gpfs', mink / 'listeners/libfsservice/fs',
+                mink / 'listeners/libfsservice/cmn',
                 qcbor / 'inc']
     originals = [
         qtee / 'libqcomtee/src/qcomtee_object.c',
@@ -69,21 +118,26 @@ def build(output, flags, emulator=None):
         *[qcbor / 'src' / name for name in (
             'UsefulBuf.c', 'qcbor_encode.c', 'qcbor_decode.c',
             'qcbor_err_to_str.c', 'ieee754.c')],
-        *CLIENT_SOURCES,
+        *[NATIVE / name for name in CORE_SOURCES],
+        CLI_SOURCE,
     ]
-    work = output / 'fingerprint'
-    work.mkdir()
     objects = []
     for index, original in enumerate(originals):
         obj = work / (str(index) + '.o')
-        command = [*flags, '-D_GNU_SOURCE', '-DUSE_QCBOR',
+        command = [*flags, '-fPIC', '-D_GNU_SOURCE', '-DUSE_QCBOR',
                    *['-I' + str(p) for p in includes],
                    '-c', original, '-o', obj]
         # Imported Qualcomm sources retain their own warning policy.
-        if original not in CLIENT_SOURCES:
+        if not original.is_relative_to(NATIVE):
             command = [arg for arg in command if arg != '-Werror']
         subprocess.run(command, check=True)
         objects.append(obj)
+    archiver = shutil.which('llvm-ar') or shutil.which('ar')
+    if not archiver:
+        raise ValueError('Fingerprint desktop integration requires ar')
+    library = work / 'libpiano-goodix.a'
+    subprocess.run([archiver, 'rcs', library, *objects[:-1]], check=True)
+    shutil.copy2(NATIVE / 'piano-goodix.h', work / 'piano-goodix.h')
     binary = work / 'piano-fingerprint-ctl'
     subprocess.run([*flags, '-static', *objects, '-pthread', '-lm', '-o', binary], check=True)
     subprocess.run(([emulator] if emulator else []) + [str(binary), '--help'], check=True)
@@ -101,13 +155,13 @@ def build(output, flags, emulator=None):
     record = {
         'inputs': inputs,
         'sources': cfg['sources'],
-        'client_source': 'linux/userspace/fingerprint/piano-goodix.c',
-        'client_sha256': digest(CLIENT / 'piano-goodix.c'),
+        'client_source': str(CLI_SOURCE.relative_to(ROOT)),
+        'client_sha256': digest(CLI_SOURCE),
         'source_files': {str(p.relative_to(ROOT)): digest(p) for p in originals},
         'firmware': json.loads(
             (ROOT / 'vendor/firmware/hyperos4-fingerprint/manifest.json').read_text())['files'],
-        'operations': ['info', 'initialize', 'prepare-auth', 'watch', 'list', 'verify'],
-        'enrollment_supported': False,
+        'operations': ['info', 'initialize', 'prepare-auth', 'watch', 'list',
+                       'storage-probe', 'enroll', 'verify', 'delete'],
     }
     if source_inputs() != inputs:
         raise ValueError('Fingerprint sources changed during compilation')
@@ -117,3 +171,84 @@ def build(output, flags, emulator=None):
         'file': str(provenance.relative_to(output)), 'bytes': provenance.stat().st_size,
         'sha256': digest(provenance), 'mode': 0o644}
     return files, record
+
+
+def desktop_recipes(output, runtime):
+    """Package standard libfprint/fprintd against the target distro ABI."""
+    cfg = json.loads((ROOT / 'config/fingerprint.json').read_text())['desktop']
+    output.mkdir(parents=True, exist_ok=True)
+    for name, record in cfg.items():
+        recipe = output / name
+        recipe.mkdir(exist_ok=True)
+        upstream = source(name, record)
+        archive = recipe / (name + '.tar')
+        subprocess.run(['git', '-C', upstream, 'archive', '--format=tar',
+                        '--prefix=' + name + '/', '--output=' + str(archive.resolve()),
+                        record['commit']], check=True)
+        patch_names = []
+        for path, expected in patches(record):
+            if digest(path) != expected:
+                raise ValueError('Fingerprint desktop patch changed: ' + str(path))
+            shutil.copy2(path, recipe / path.name)
+            patch_names.append(path.name)
+        local = ['libpiano-goodix.a', 'piano-goodix.h'] if name == 'libfprint' else []
+        for filename in local:
+            shutil.copy2(runtime / 'fingerprint' / filename, recipe / filename)
+        files = [archive.name, *patch_names, *local]
+        quoted = lambda values: ' '.join(shlex.quote(str(value)) for value in values)
+        dependencies = (['glib2', 'libgusb', 'libgudev', 'pixman', 'openssl']
+                        if name == 'libfprint' else ['libfprint', 'dbus', 'dbus-glib', 'polkit', 'pam'])
+        prepare = ''.join('  patch -d "$srcdir/' + name + '" -p1 < "$srcdir/' + p + '"\n'
+                          for p in patch_names)
+        sdk = ''
+        options = ('-Ddoc=false -Dgtk-examples=false -Dinstalled-tests=false '
+                   '-Dudev_rules_dir=/usr/lib/udev/rules.d -Dudev_hwdb=disabled'
+                   if name == 'libfprint' else '-Dgtk_doc=false -Dman=false')
+        if name == 'libfprint':
+            sdk = '''  mkdir -p "$srcdir/sdk/lib/pkgconfig" "$srcdir/sdk/include"
+  cp "$srcdir/libpiano-goodix.a" "$srcdir/sdk/lib/"
+  cp "$srcdir/piano-goodix.h" "$srcdir/sdk/include/"
+  cat > "$srcdir/sdk/lib/pkgconfig/piano-goodix.pc" <<EOF
+Name: piano-goodix
+Description: Piano signed-TA fingerprint transport
+Version: 1.0
+Libs: -L$srcdir/sdk/lib -lpiano-goodix -pthread -lm
+Cflags: -I$srcdir/sdk/include
+EOF
+  export PKG_CONFIG_PATH="$srcdir/sdk/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+'''
+        recipe_text = (
+            f'pkgname={name}\npkgver={record["version"]}\npkgrel=1.1\n'
+            'arch=(aarch64)\nlicense=(LGPL-2.1-or-later)\n'
+            f'pkgdesc="Standard {name} with Piano fingerprint support"\n'
+            f'url={record["url"]}\ndepends=({quoted(dependencies)})\n'
+            'makedepends=(base-devel meson ninja gobject-introspection python-docutils perl)\n'
+            'options=(!lto !debug)\n'
+            + ('noextract=(libpiano-goodix.a)\n' if name == 'libfprint' else '') +
+            f'source=({quoted(files)})\nsha256sums=({quoted(digest(recipe / f) for f in files)})\n'
+            'prepare() {\n' + (prepare or '  :\n') + '}\n'
+            'build() {\n' + sdk + f'  meson setup build {name} --prefix=/usr --libdir=lib '
+            f'--buildtype=release {options}\n  meson compile -C build -j4\n}}\n'
+            'package() {\n  DESTDIR="$pkgdir" meson install -C build\n}\n')
+        (recipe / 'PKGBUILD').write_text(recipe_text)
+    return cfg
+
+
+def install_desktop(root, runtime, output):
+    import build_arch_package
+    recipes = output / 'recipes'
+    desktop_recipes(recipes, runtime)
+    for name in ('libfprint', 'fprintd'):
+        packages = output / name
+        if not (packages / 'manifest.json').is_file():
+            build_arch_package.build(root, recipes / name, packages)
+        else:
+            build_arch_package.install_cached(root, packages)
+    desktop_service(root)
+
+
+def desktop_service(root):
+    config = root / 'usr/lib/systemd/system/fprintd.service.d/20-piano.conf'
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text('[Service]\nStateDirectory=piano-goodix\nStateDirectoryMode=0700\n'
+                      'DeviceAllow=char-uio rw\nDeviceAllow=char-tee rw\nDeviceAllow=char-bsg rw\n')

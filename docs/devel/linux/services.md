@@ -4,24 +4,21 @@
 
 | 要修改的内容 | 源码位置 | 安装位置或构建入口 |
 | --- | --- | --- |
-| 显示、触屏、键盘、无线、DSP、音频、视频服务的 unit | [`linux/bsp/common/usr/lib/systemd/system/`](../../../linux/bsp/common/usr/lib/systemd/system/) | 配置包安装到 `/usr/lib/systemd/system/` |
-| 上述服务调用的 `display-start`、`touch-start`、`keyboard-start` 等脚本原版 | [`upstream/debian-piano-current/rootfs/overlay/usr/lib/piano/`](../../../upstream/debian-piano-current/rootfs/overlay/usr/lib/piano/) | 经本地适配后安装到 `/usr/lib/piano/` |
-| 启动脚本的本地适配 | [`tools/stage_piano_ram_hardware.py`](../../../tools/stage_piano_ram_hardware.py) | `adapt()` 修改固定上游脚本，`build()` 生成并可安装派生文件 |
-| 本地 DMA 状态读取与启动准备 helper | [`linux/userspace/piano-ram-hardware-prepare`](../../../linux/userspace/piano-ram-hardware-prepare) | 由上述适配工具安装到 `/usr/lib/piano/`；也用于磁盘根系统，名字保留自早期 RAM 启动 |
+| 触屏和 USB 网络的 unit | [`linux/bsp/common/usr/lib/systemd/system/`](../../../linux/bsp/common/usr/lib/systemd/system/) | 配置包安装到 `/usr/lib/systemd/system/` |
+| 共用硬件运行时安装 | [`tools/stage_piano_ram_hardware.py`](../../../tools/stage_piano_ram_hardware.py) | 读取 BSP 清单、保留权限和符号链接，清理旧的按序加载服务 |
+| DMA 状态诊断 | [`linux/userspace/piano-ram-hardware-prepare`](../../../linux/userspace/piano-ram-hardware-prepare) | 仅用于显式诊断，不阻止模块自动探测 |
 | 触屏帧解析与输入上报 | [`upstream/debian-piano-current/initramfs/touch-view/piano-touch-view.c`](../../../upstream/debian-piano-current/initramfs/touch-view/piano-touch-view.c) | 编译为 `/usr/bin/piano-touch-view`，由 `piano-touch.service` 启动 |
 | 触屏程序的本地观测补丁 | [`tools/patches/piano-touch-view-observability.patch`](../../../tools/patches/piano-touch-view-observability.patch) | `build_piano_runtime_helpers.py` 派生源码，`build_release_helpers.py` 编译 |
-| 相机服务与图像桥接程序 | [`linux/bsp/optional/camera/`](../../../linux/bsp/optional/camera/) 与 [`upstream/debian-piano-current/camera/piano-camerad.c`](../../../upstream/debian-piano-current/camera/piano-camerad.c) | 可选配置包安装 unit；helper 构建工具编译 `/usr/lib/piano/piano-camerad` |
-| 相机 CCM 控件回写修复 | [`tools/patches/piano-camerad-writable-ccm.patch`](../../../tools/patches/piano-camerad-writable-ccm.patch) | `build_piano_runtime_helpers.py` 派生可写数组；`build_release_helpers.py` 使用同一来源，避免 `S_EXT_CTRLS` 向只读常量回写而报 `Bad address` |
-| 相机自动曝光稳定性 | [`tools/patches/piano-camerad-stable-ae.patch`](../../../tools/patches/piano-camerad-stable-ae.patch) | 同一 `derive_camerad_source()` 顺序应用 CCM 和 AE 补丁，两条 helper 构建入口使用相同源码 |
+| 相机服务、图像处理与控制接口 | [`linux/bsp/optional/camera/`](../../../linux/bsp/optional/camera/) 与 [`linux/userspace/camera/`](../../../linux/userspace/camera/) | 共用 Makefile 编译服务与客户端，两条运行库构建入口使用同一份源码 |
 | 音频 UCM、模块加载参数、udev 配置 | [`linux/bsp/common/`](../../../linux/bsp/common/) | 按目录布局安装；文件清单在 `linux/bsp/manifest.json` |
 | Linux 调试入口与引导脚本 | [`linux/userspace/`](../../../linux/userspace/) | 包含 `piano-debug-bootstrap`、debug/serial unit、磁盘与 RAM 引导脚本 |
 | 内核配置与板级设备树 | [`linux/configs/`](../../../linux/configs/) 与 [`linux/dts/`](../../../linux/dts/) | 内核源码位于 `upstream/linux-piano/`，补丁来源见内核角色说明 |
 
-例如，`piano-keyboard.service` 调用 `/usr/lib/piano/keyboard-start`。它的原版脚本在上游 overlay，本地等待参数由 `stage_piano_ram_hardware.py` 添加，DMA 状态读取函数则在 `linux/userspace/piano-ram-hardware-prepare`。热更新设备后，修复仍必须保存在这些构建输入中，下一次制作 rootfs 才能保留。
+硬件驱动通过 OF、platform、SPI、RPMsg 等标准 modalias 加载，依赖由设备树、内核 supplier 和延迟探测表达。显示、键盘、无线、音频和视频没有按加载顺序运行的用户空间服务。热更新定位后的修复必须写回内核、设备树或对应程序源码。
 
-键盘背光使用内核 LED 节点 `nanosic::kbd_backlight`，经 UPower 和桌面电源组件调节。`linux/bsp/common/usr/lib/systemd/system/upower.service.d/20-piano-keyboard.conf` 让 UPower 在键盘初始化后启动；release 适配工具也读取这同一份文件，不另写一套调光服务。
+键盘背光使用内核 LED 节点 `nanosic::kbd_backlight`，经 UPower 和桌面电源组件调节。蓝牙地址由 UEFI 通过标准设备树属性交给内核，触屏解码由设备绑定事件触发。ADSP 和 CDSP 由内核 `remoteproc` 驱动自动启动，设备树不再禁用 ADSP 自动启动，也不依赖用户空间等待显示接管。
 
-当前相机服务在用户会话开始前创建 V4L2 loopback 节点，并由 `piano-camerad` 发送 systemd 就绪通知。相机驱动仍由 `piano-camera.service` 在显示、触屏初始化后加载；应用请求视频时才启动采集。`CAMERA_START=0` 同时禁用这两部分。升级时需要一起更新 unit 和 helper，旧程序不发送就绪通知，不能与新的 `Type=notify` unit 混用。
+相机服务在用户会话开始前创建 V4L2 loopback 节点，并发送 systemd 就绪通知；只有应用请求视频时才启动采集。相机驱动由硬件别名自动探测，`CAMERA_START=0` 禁用图像服务。升级时一起更新 unit 和 helper。
 
 2026-10-08 的 `g086a94c4529d` 实机已绑定主线接口驱动 `qcom-camss`、后置 `s5kjn1 7-0010`、前置 `ov32d40 5-0010` 和对焦 `dw9768 7-000c`。原厂最终 DT 与现有 [相机 overlay](../../../upstream/debian-piano-current/boot/dtbo-piano-camera.dts) 对应：后置走 CCI0 master1、GPIO115/116、CSIPHY1；前置走 QUP2 SE1 I²C、GPIO4/5、CSIPHY4。内核的 `drivers/media/platform/qcom/camss/` 已包含 SM8750、CSID980 和 TFE Gen4 支持，两个 sensor 位于 `drivers/media/i2c/{s5kjn1,ov32d40}.c`。这不是重新移植缺失驱动的场景；`video40/41` 是 loopback，不能单凭枚举判定有图像。此版本经普通 BOOT 启动后，两路各做了30帧短采集，硬件各输出28帧；前后预览已检查，未再出现 CCM `Bad address`。后置等待90帧后画面比初始预览更清晰。长期帧率、同时采集和 GNOME 应用体验仍未验证。
 
@@ -36,13 +33,9 @@
 通用多发行版路径由 [`tools/assemble_rootfs.py`](../../../tools/assemble_rootfs.py) 安装发行版、桌面和显式选择的 BSP/运行时包；[`tools/package_bsp.py`](../../../tools/package_bsp.py) 按 `linux/bsp/manifest.json` 打包本地配置。配置包本身不自动启用服务，也不包含内核模块或原生程序。
 
 Arch+niri 由 `tools/build_arch_niri_rootfs.py` 和 `tools/stage_arch_piano.py`
-装配。固定的上游 overlay 提供硬件服务，再安装本项目的适配器、内核模块和原生
-helper，并应用独立 root 分区策略。`tools/rootfs/` 保存公共的构建和启动工具。
-因此只修改 `linux/bsp/common/` 时，仍需核对实际 staging 路径是否安装了该文件。
-电源键由 logind 处理，配置与验证见[电源键和睡眠](../hardware/power-button.md)。
-
-## 仍需收敛的地方
-
-本地适配仍在构建时用 Python 修改固定上游脚本，完整的派生脚本没有作为源码直接存放在 `linux/`；通用 BSP 与 Debian release 的配置安装入口也尚未完全统一。这两处应逐步合并为同一份运行时补丁及安装来源。迁移时比较生成文件，保留当前能运行的服务行为。
+装配。固定的上游 overlay 提供公共硬件文件，`stage_piano_ram_hardware.build()`
+按 BSP 清单保留文件权限和符号链接、清理旧驱动加载服务，再安装匹配的内核模块
+与原生程序。`tools/rootfs/` 保存公共构建和启动工具。
+电源键由 logind 处理，见[电源键和睡眠](../hardware/power-button.md)。
 
 旧 `bootprofiles/` 的源码已分别迁入 `uefi/` 和 `linux/`。该目录本地剩余的 `BootShim.bin`、`BootShim.elf` 与 `__pycache__` 是历史编译产物，当前工具使用 `uefi/handoff/bootshim/`，不从旧目录构建。

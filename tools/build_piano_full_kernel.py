@@ -20,7 +20,7 @@ from build_kernel import image_info
 from prepare_linux_modules import modinfo
 
 ROOT=Path(__file__).resolve().parents[1]
-COMMIT='352508459733d3e6d349ea5581a8dd2fd8bb4180'
+COMMIT=json.loads((ROOT/'config/release.json').read_text())['kernel']['public_baseline']
 BASE_COMMIT='500df175a7f9e6bc1a9c328590ca5150f84f9ff0'
 WORK=ROOT/'build/kernel-worktrees/piano-full-integration'
 OUT=ROOT/'build/kernels/full-integration'
@@ -54,7 +54,8 @@ PEN_DOCK_OVERRIDES={'CONFIG_INPUT_XIAOMI_PIANO_PEN_DOCK':'m', 'CONFIG_CHARGER_SC
 IR_OVERRIDES={'CONFIG_LIRC':'y','CONFIG_IR_SPI':'m'}
 USERSPACE_SECURITY_OVERRIDES={'CONFIG_SECURITY_LANDLOCK':'y'}
 SLEEP_OVERRIDES={'CONFIG_QCOM_SMP2P_SLEEPSTATE':'y',
-                 'CONFIG_RTC_HCTOSYS':'n','CONFIG_RTC_SYSTOHC':'n'}
+                 'CONFIG_RTC_HCTOSYS':'y','CONFIG_RTC_HCTOSYS_DEVICE':'"rtc0"',
+                 'CONFIG_RTC_SYSTOHC':'n'}
 PM_DEBUG_OVERRIDES={'CONFIG_PM_DEBUG':'y','CONFIG_PM_SLEEP_DEBUG':'y'}
 PLATFORM_OVERRIDES={key:'n' for key in (
     'CONFIG_BATTERY_QCOM_BATTMGR',
@@ -78,6 +79,7 @@ PLATFORM_OVERRIDES.update({
 PLATFORM_OVERRIDES.update({key: 'y' for key in (
     'CONFIG_NF_TABLES_INET', 'CONFIG_NF_CONNTRACK_MARK', 'CONFIG_NF_CONNTRACK_ZONES')})
 PLATFORM_OVERRIDES.update({key: 'm' for key in (
+    'CONFIG_BATTERY_PIANO',
     'CONFIG_UIO', 'CONFIG_UIO_PIANO_FINGERPRINT',
     'CONFIG_NF_TABLES', 'CONFIG_NFT_CT', 'CONFIG_NFT_LOG', 'CONFIG_NFT_LIMIT',
     'CONFIG_NFT_MASQ', 'CONFIG_NFT_REDIR', 'CONFIG_NFT_NAT',
@@ -85,6 +87,8 @@ PLATFORM_OVERRIDES.update({key: 'm' for key in (
     'CONFIG_NFT_FIB_IPV4', 'CONFIG_NFT_FIB_IPV6', 'CONFIG_NFT_FIB_INET', 'CONFIG_NFT_COMPAT',
     'CONFIG_CRYPTO_USER_API_HASH', 'CONFIG_CRYPTO_USER_API_SKCIPHER')})
 PLATFORM_OVERRIDES.update({'CONFIG_FTRACE': 'y', 'CONFIG_ENABLE_DEFAULT_TRACERS': 'y'})
+PLATFORM_OVERRIDES.update({'CONFIG_ANDROID_BINDER_IPC': 'y', 'CONFIG_ANDROID_BINDERFS': 'y',
+                           'CONFIG_ANDROID_BINDER_DEVICES': '"binder,hwbinder,vndbinder"'})
 ALLOWED_OVERRIDES={**BLUETOOTH_OVERRIDES,**FILESYSTEM_OVERRIDES,**PEN_DOCK_OVERRIDES,**IR_OVERRIDES,**FLASH_OVERRIDES,**EARLY_CPUCP_OVERRIDES,
                    **USERSPACE_SECURITY_OVERRIDES,**SLEEP_OVERRIDES,**PM_DEBUG_OVERRIDES,**PLATFORM_OVERRIDES}
 
@@ -148,6 +152,12 @@ def verify_source(work=WORK,commit=None):
         base=policy['base_commit']
     else:
         base=COMMIT
+        series=json.loads((ROOT/policy['patch_series']).read_text())
+        target=series['original_target_commit']
+        target_tree=subprocess.run(['git','rev-parse',target+'^{tree}'],cwd=work,capture_output=True,text=True)
+        if target_tree.returncode==0 and target_tree.stdout.strip()==policy['target_tree'] and \
+           subprocess.run(['git','merge-base','--is-ancestor',target,commit],cwd=work,capture_output=True).returncode==0:
+            base=policy['base_commit']
     if commit!=base and subprocess.run(['git','merge-base','--is-ancestor',base,commit],cwd=work,capture_output=True).returncode:
         raise ValueError('Kernel source does not descend from its recorded baseline')
     if text(['git','status','--porcelain=v1','--untracked-files=all'],work):raise ValueError('Full candidate source is dirty')

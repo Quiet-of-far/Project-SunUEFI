@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-PATCH = ROOT / 'patches/linux/7.3/0042-power-piano-charge-limit.patch'
+PATCH = ROOT / 'patches/linux/7.3/0082-power-piano-charge-limit.patch'
 
 
 def patched_function(name):
@@ -36,46 +36,33 @@ typedef uint8_t u8;
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof((x)[0]))
 #define max(a,b) ((a)>(b)?(a):(b))
 #define MCA_PROP_CHARGE_ENABLE 0x2003
+#define MCA_OP_READ 1
 #define MCA_CP_OFF 0
 #define MCA_CP_DONE 1
 #define MCA_CP_ON 2
-#define POWER_SUPPLY_PROP_ONLINE 2
 #define POWER_SUPPLY_PROP_CAPACITY 0
 #define POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD 1
 enum power_supply_property { UNUSED_PROPERTY = 9 };
 union power_supply_propval { int intval; };
-struct device { void *data; };
 struct power_supply { void *data; };
 struct piano_mca {
-    struct device *dev;
-    struct power_supply *usb;
-    unsigned charge_limit, charge_generation, pdr_generation;
-    bool limit_latched, charge_state_valid, charging_enabled;
-    bool charge_managed, limit_cp_stopped;
-    bool online, service_up, sleeping, stopping;
-    int cp, poll, policy_lock, poll_lock;
+    void *client;
+    unsigned charge_limit;
+    bool limit_latched, limit_paused, charge_managed, sleeping, stopping;
+    int cp, poll, policy_lock;
 };
 static const char *piano_mca_supplied_to[] = {"gauge0", "gauge1"};
 static struct power_supply gauges[2];
-static int soc[2], gauge_error, missing_gauge, cp_error, write_error;
-static int writes, last_enabled, cp_stops, sequence, stop_order, write_order;
-static int requests, notifications, cancels;
-static bool restart_in_write;
-static int stage_read_error, stage_on_reads, sleeps;
-static int piano_mca_cp_get(struct piano_mca *m, int prop, int *on) {
-    (void)m; assert(prop == POWER_SUPPLY_PROP_ONLINE);
-    if (stage_read_error) return stage_read_error;
-    *on = stage_on_reads > 0;
-    if (stage_on_reads) stage_on_reads--;
-    return 0;
-}
-static void msleep(int delay) { assert(delay == 100); sleeps++; }
-
-static int system_percpu_wq;
+static int soc[2], gauge_error, missing_gauge, cp_error, pause_error;
+static int cp_stops, pauses, requests, notifications;
+static int charge_read_error, charge_write_error, charge_actual, charge_writes;
+static bool lose_ack, ignore_write;
+static int system_freezable_wq;
+static unsigned pmic_glink_get_generation(void *client) { (void)client; return 7; }
+static unsigned piano_mca_connection_generation(struct piano_mca *m) { (void)m; return 8; }
 static struct power_supply *power_supply_get_by_name(const char *name) {
     int i = !strcmp(name,"gauge1");
-    if (missing_gauge == i+1) return NULL;
-    return &gauges[i];
+    return missing_gauge == i+1 ? NULL : &gauges[i];
 }
 static int power_supply_get_property(struct power_supply *psy, int p,
                                       union power_supply_propval *v) {
@@ -87,152 +74,128 @@ static void power_supply_put(struct power_supply *psy) { assert(psy); }
 static bool piano_mca_cp_active(struct piano_mca *m) { return m->cp == MCA_CP_ON; }
 static int piano_mca_cp_stop(struct piano_mca *m, const char *why) {
     (void)why;
-    if (!piano_mca_cp_active(m)) return 0;
-    cp_stops++; stop_order = ++sequence;
+    cp_stops++;
     if (cp_error) return cp_error;
     m->cp = MCA_CP_DONE; return 0;
 }
-static int piano_mca_write(struct piano_mca *m, unsigned p, const void *data, size_t n) {
-    assert(p == MCA_PROP_CHARGE_ENABLE && n == 1 && *(const u8 *)data <= 1);
-    writes++; last_enabled = *(const u8 *)data; write_order = ++sequence;
-    if (restart_in_write) { m->pdr_generation++; restart_in_write = false; }
-    return write_error;
+static int piano_mca_normal_pause(struct piano_mca *m, unsigned g, unsigned c) {
+    (void)m; assert(g==7 && c==8); pauses++; return pause_error;
 }
-#define dev_info(...) ((void)0)
 static void power_supply_changed(struct power_supply *p) { (void)p; notifications++; }
 static void *power_supply_get_drvdata(struct power_supply *p) { return p->data; }
-static void *dev_get_drvdata(struct device *d) { return d->data; }
 static void mutex_lock(int *p) { assert(!*p); *p = 1; }
 static void mutex_unlock(int *p) { assert(*p); *p = 0; }
-static void mod_delayed_work(int q, int *p, unsigned long delay) { (void)q;(void)p;assert(!delay);requests++; }
-#define spin_lock_irqsave(p,f) do { (f)=0; mutex_lock(p); } while(0)
-#define spin_unlock_irqrestore(p,f) do { (void)(f); mutex_unlock(p); } while(0)
-#define spin_lock_irq(p) mutex_lock(p)
-#define spin_unlock_irq(p) mutex_unlock(p)
-static void cancel_delayed_work_sync(int *p) { (void)p; cancels++; }
+static void mod_delayed_work(int q, int *p, unsigned long delay) {
+    (void)q; (void)p; assert(!delay); requests++;
+}
+static int piano_mca_xfer(struct piano_mca *m, int op, int prop, void *data,
+                          size_t n, unsigned g, unsigned c) {
+    (void)m; assert(op==MCA_OP_READ && prop==MCA_PROP_CHARGE_ENABLE && n==1 && g==7 && c==8);
+    if (charge_read_error) return charge_read_error;
+    *(u8 *)data=charge_actual; return 0;
+}
+static int piano_mca_write_session(struct piano_mca *m, int prop, void *data,
+                                   size_t n, unsigned g, unsigned c) {
+    (void)m; assert(prop==MCA_PROP_CHARGE_ENABLE && n==1 && g==7 && c==8);
+    charge_writes++;
+    if (!ignore_write && (!charge_write_error || lose_ack)) charge_actual=*(u8 *)data;
+    return charge_write_error;
+}
 '''
 
 CASES = r'''
-static struct piano_mca fresh(struct power_supply *psy, struct device *dev) {
-    struct piano_mca m = {.charge_limit=100,.online=true,.service_up=true,
-                           .pdr_generation=1,.usb=psy,.dev=dev,.cp=MCA_CP_ON};
-    gauge_error=missing_gauge=cp_error=write_error=0;
-    writes=cp_stops=sequence=stop_order=write_order=requests=notifications=cancels=0;
-    restart_in_write=false; soc[0]=soc[1]=70;
-    return m;
-}
 int main(void) {
-    struct power_supply psy = {0}; struct device dev = {0};
-    struct piano_mca m = fresh(&psy,&dev); psy.data=dev.data=&m;
+    struct piano_mca m = {.charge_limit=100,.cp=MCA_CP_ON};
+    struct power_supply psy = {.data=&m};
     union power_supply_propval v = {.intval=80};
-    assert(!piano_mca_cp_wait_stopped(&m) && sleeps==0);
-    stage_on_reads=3;
-    assert(!piano_mca_cp_wait_stopped(&m) && sleeps==3);
-    stage_on_reads=100; sleeps=0;
-    assert(piano_mca_cp_wait_stopped(&m)==-EBUSY && sleeps==5);
-    stage_read_error=-EIO;
-    assert(piano_mca_cp_wait_stopped(&m)==-EIO);
-    stage_read_error=stage_on_reads=0;
-
-    assert(!piano_mca_apply_charge_limit(&m,false) && writes==0 && cp_stops==0);
+    soc[0]=soc[1]=70;
+    assert(!piano_mca_apply_charge_limit(&m,false) && !pauses && !cp_stops);
     assert(!piano_mca_usb_set_property(&psy,1,&v) && m.charge_limit==80 && requests==1);
     v.intval=49; assert(piano_mca_usb_set_property(&psy,1,&v)==-EINVAL);
     v.intval=101; assert(piano_mca_usb_set_property(&psy,1,&v)==-EINVAL);
     v.intval=80; assert(piano_mca_usb_set_property(&psy,UNUSED_PROPERTY,&v)==-EINVAL);
     assert(piano_mca_usb_property_is_writeable(&psy,1));
     assert(!piano_mca_usb_property_is_writeable(&psy,UNUSED_PROPERTY));
-    assert(!piano_mca_apply_charge_limit(&m,false) && last_enabled==1 && writes==1);
+    assert(!piano_mca_apply_charge_limit(&m,false) && !m.limit_paused && m.charge_managed);
     soc[1]=80;
-    assert(!piano_mca_apply_charge_limit(&m,false) && m.limit_latched && !m.charging_enabled);
-    assert(cp_stops==1 && stop_order<write_order && last_enabled==0);
-    int before=writes;
-    soc[0]=soc[1]=79; assert(!piano_mca_apply_charge_limit(&m,false) && writes==before);
-    soc[0]=soc[1]=76; assert(!piano_mca_apply_charge_limit(&m,false) && writes==before);
-    soc[0]=soc[1]=75;
-    assert(!piano_mca_apply_charge_limit(&m,false) && m.charging_enabled && m.cp==MCA_CP_OFF);
-    assert(!m.limit_latched && writes==before+1);
-    soc[0]=80; assert(!piano_mca_apply_charge_limit(&m,false));
-    m.pdr_generation++; before=writes;
-    assert(!piano_mca_apply_charge_limit(&m,false) && writes==before+1 && last_enabled==0);
-    m.online=false;
-    assert(!piano_mca_apply_charge_limit(&m,false) && m.charging_enabled && !m.limit_latched);
-    m.online=true; assert(!piano_mca_apply_charge_limit(&m,false) && !m.charging_enabled);
+    assert(!piano_mca_apply_charge_limit(&m,false) && m.limit_latched && m.limit_paused);
+    assert(cp_stops==1 && pauses==1);
+    /* Even a call from another normal-charge path cannot override the cap. */
+    assert(piano_mca_normal_enable(&m,true,7,8)==-EBUSY && charge_writes==0);
+    soc[1]=79; assert(!piano_mca_apply_charge_limit(&m,false) && m.limit_paused);
+    soc[0]=75; soc[1]=76;
+    assert(!piano_mca_apply_charge_limit(&m,false) && m.limit_paused);
+    soc[1]=75;
+    assert(!piano_mca_apply_charge_limit(&m,false) && !m.limit_paused && m.cp==MCA_CP_OFF);
+    /* Clearing the cap must not itself enable charge before JEITA setup. */
+    assert(charge_writes==0);
+    soc[0]=80; assert(!piano_mca_apply_charge_limit(&m,false) && m.limit_paused);
     v.intval=100; assert(!piano_mca_usb_set_property(&psy,1,&v));
-    assert(!piano_mca_apply_charge_limit(&m,false) && m.charging_enabled);
-    m.service_up=false; assert(!piano_mca_apply_charge_limit(&m,false));
+    assert(!piano_mca_apply_charge_limit(&m,false) && !m.limit_paused && !m.limit_latched);
+    assert(charge_writes==0);
 
-    m=fresh(&psy,&dev); m.charge_limit=80; soc[0]=101;
-    assert(!piano_mca_apply_charge_limit(&m,false) && !m.charging_enabled);
-    soc[0]=70; gauge_error=-EIO;
-    assert(!piano_mca_apply_charge_limit(&m,false) && !m.charging_enabled);
+    m.charge_limit=80; soc[0]=soc[1]=70;
+    gauge_error=-EIO; assert(!piano_mca_apply_charge_limit(&m,false) && m.limit_paused);
     gauge_error=0; missing_gauge=2;
-    assert(!piano_mca_apply_charge_limit(&m,false) && !m.charging_enabled);
-    missing_gauge=0;
-    assert(!piano_mca_apply_charge_limit(&m,false) && m.charging_enabled);
-    assert(!piano_mca_apply_charge_limit(&m,true) && !m.charging_enabled);
-    m.online=false;
-    assert(!piano_mca_apply_charge_limit(&m,true) && !m.charging_enabled);
+    assert(!piano_mca_apply_charge_limit(&m,false) && m.limit_paused);
+    missing_gauge=0; soc[0]=101;
+    assert(!piano_mca_apply_charge_limit(&m,false) && m.limit_paused);
+    soc[0]=-1; assert(!piano_mca_apply_charge_limit(&m,false) && m.limit_paused);
+    soc[0]=70;
+    assert(!piano_mca_apply_charge_limit(&m,true) && m.limit_paused);
+    m.sleeping=true;
+    assert(!piano_mca_apply_charge_limit(&m,false) && m.limit_paused);
+    assert(piano_mca_usb_set_property(&psy,1,&v)==-EBUSY && m.charge_limit==80);
+    m.sleeping=false; m.stopping=true;
+    assert(piano_mca_usb_set_property(&psy,1,&v)==-EBUSY);
+    m.stopping=false;
+    assert(!piano_mca_apply_charge_limit(&m,false) && !m.limit_paused);
 
-    m=fresh(&psy,&dev); m.charge_limit=80; soc[0]=80; cp_error=-EIO;
-    assert(piano_mca_apply_charge_limit(&m,false)==-EIO && last_enabled==0 && m.cp==MCA_CP_ON);
-    cp_error=0; assert(!piano_mca_apply_charge_limit(&m,false) && m.cp==MCA_CP_DONE);
-    m=fresh(&psy,&dev); m.charge_limit=80;
-    assert(!piano_mca_apply_charge_limit(&m,false) && m.charging_enabled);
-    soc[0]=80; write_error=-ETIMEDOUT;
-    assert(piano_mca_apply_charge_limit(&m,false)==-ETIMEDOUT && !m.charge_state_valid);
-    write_error=0; m.charge_limit=100;
-    assert(!piano_mca_apply_charge_limit(&m,false) && m.charging_enabled);
-    m=fresh(&psy,&dev); m.charge_limit=80; soc[0]=80; write_error=-ETIMEDOUT;
-    assert(piano_mca_apply_charge_limit(&m,false)==-ETIMEDOUT && !m.charge_state_valid);
-    assert(m.charge_managed && m.limit_cp_stopped);
-    write_error=0; m.charge_limit=100;
-    assert(!piano_mca_apply_charge_limit(&m,false) && m.charging_enabled);
-    assert(m.cp==MCA_CP_OFF && !m.limit_cp_stopped);
-    m.charge_limit=80;
-    assert(!piano_mca_apply_charge_limit(&m,false) && !m.charging_enabled);
-    m.pdr_generation++; restart_in_write=true;
-    assert(piano_mca_apply_charge_limit(&m,false)==-EAGAIN);
-    assert(m.charge_generation!=m.pdr_generation);
-    assert(!piano_mca_apply_charge_limit(&m,false) && m.charge_generation==m.pdr_generation);
-    m.service_up=false; before=writes;
-    assert(piano_mca_apply_charge_limit(&m,false)==-ENODEV && writes==before);
+    soc[0]=80; m.cp=MCA_CP_ON; cp_error=-EBUSY;
+    int before=pauses;
+    assert(piano_mca_apply_charge_limit(&m,false)==-EBUSY && pauses==before+1);
+    assert(m.limit_paused && m.cp==MCA_CP_ON);
+    cp_error=0; pause_error=-ETIMEDOUT;
+    assert(piano_mca_apply_charge_limit(&m,false)==-ETIMEDOUT && m.limit_paused);
+    pause_error=0; assert(!piano_mca_apply_charge_limit(&m,false));
+    /* Stop is checked every poll, not cached across firmware/cable resets. */
+    before=pauses; assert(!piano_mca_apply_charge_limit(&m,false) && pauses==before+1);
 
-    m=fresh(&psy,&dev); m.charge_limit=80;
-    assert(!piano_mca_prepare(&dev) && m.sleeping && last_enabled==0 && cancels==1);
-    piano_mca_complete(&dev);
-    assert(!m.sleeping && requests==1);
-    assert(!piano_mca_apply_charge_limit(&m,false) && m.charging_enabled);
-    m.online=false;
-    assert(!piano_mca_prepare(&dev) && !m.charging_enabled);
-    piano_mca_complete(&dev);
-    m.service_up=false; before=requests;
-    assert(piano_mca_prepare(&dev)==-ENODEV && !m.sleeping && requests==before+1);
-    m.stopping=true; before=requests;
-    assert(piano_mca_usb_set_property(&psy,1,&v)==-ENODEV && requests==before);
-    piano_mca_complete(&dev); assert(requests==before);
+    m.limit_paused=false; charge_actual=1;
+    assert(!piano_mca_normal_enable(&m,true,7,8) && charge_writes==0);
+    assert(!piano_mca_normal_enable(&m,false,7,8) && charge_actual==0 && charge_writes==1);
+    charge_read_error=-EIO;
+    assert(piano_mca_normal_enable(&m,true,7,8)==-EIO && charge_writes==1);
+    assert(piano_mca_normal_enable(&m,false,7,8)==-EIO && charge_writes==2);
+    charge_read_error=0; charge_actual=1; ignore_write=true;
+    assert(piano_mca_normal_enable(&m,false,7,8)==-EIO);
+    ignore_write=false; charge_write_error=-ETIMEDOUT; lose_ack=true;
+    assert(piano_mca_normal_enable(&m,false,7,8)==-ETIMEDOUT && charge_actual==0);
+    charge_write_error=0;
+    assert(!piano_mca_normal_enable(&m,false,7,8));
+    assert(!piano_mca_normal_enable(&m,true,7,8) && charge_actual==1);
     return 0;
 }
 '''
 
 
-@unittest.skipUnless(shutil.which('cc'), 'C compiler is required')
-class PianoChargeLimitTests(unittest.TestCase):
-    def test_actual_policy_with_failed_transport_and_sleep(self):
-        names = ('piano_mca_queue_poll', 'piano_mca_pause_poll', 'piano_mca_cp_wait_stopped', 'piano_mca_charge_soc', 'piano_mca_apply_charge_limit',
-                 'piano_mca_usb_set_property', 'piano_mca_usb_property_is_writeable',
-                 'piano_mca_prepare', 'piano_mca_complete')
-        source = PRELUDE + '\n'.join(patched_function(name) for name in names) + CASES
-        with tempfile.TemporaryDirectory(prefix='charge-policy-') as temporary:
-            folder = Path(temporary)
-            path = folder / 'policy.c'
-            path.write_text(source)
-            result = subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
-                                     '-Wno-unused-parameter', '-fsanitize=address,undefined',
-                                     '-fno-pie', '-no-pie', str(path), '-o', str(folder / 'policy')],
-                                    capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            result = subprocess.run([str(folder / 'policy')], capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+class ChargeLimitTests(unittest.TestCase):
+    def test_real_policy_with_cell_imbalance_io_errors_and_charge_feedback(self):
+        cc = shutil.which('cc')
+        if not cc:
+            self.skipTest('C compiler unavailable')
+        functions = '\n\n'.join(patched_function(name) for name in (
+            'piano_mca_charge_soc', 'piano_mca_apply_charge_limit',
+            'piano_mca_normal_enable', 'piano_mca_usb_set_property',
+            'piano_mca_usb_property_is_writeable'))
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'limit.c'
+            executable = Path(directory) / 'limit'
+            source.write_text(PRELUDE + functions + CASES)
+            subprocess.run([cc, '-std=gnu11', '-Wall', '-Wextra', '-Werror',
+                            '-Wno-unused-parameter', '-fsanitize=address,undefined',
+                            '-fno-omit-frame-pointer', str(source), '-o', str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
 
 
 if __name__ == '__main__':

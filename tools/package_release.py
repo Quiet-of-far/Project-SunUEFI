@@ -55,6 +55,9 @@ def normalize_mainline_bindings(board):
         if props.get('iommus') == b'':
             del props['iommus']
             changes.append(path + ':iommus')
+        if path == '/soc/remoteproc-adsp@03000000' and 'qcom,no-auto-boot' in props:
+            del props['qcom,no-auto-boot']
+            changes.append(path + ':qcom,no-auto-boot')
         if (path == '/soc/xiaomi_fingerprint' and
                 props.get('compatible') == b'xiaomi,piano-goodix-control\0'):
             # The new controller uses the real mainline supply and GPIOs.
@@ -136,6 +139,23 @@ def normalize_mainline_bindings(board):
         # Zero-length placeholders are not reserved memory. Leave any real
         # allocation supplied by the bootloader intact.
         if props.get('reg') == bytes(16) and props.get('status') != b'disabled\0':
+            props['status'] = b'disabled\0'
+            changes.append(path + ':status')
+    # These reusable pools belong to downstream CNSS, DMA heaps, CVP,
+    # minidump, memshare and secure-VM loaders, not their mainline replacements.
+    # Reserving them first can exhaust low RAM before linux,cma is allocated.
+    # Never release a fixed allocation or a no-map firmware reservation.
+    unused_pools = (
+        'cnss_wlan_region', 'sp_region', 'qseecom_region', 'qseecom_ta_region',
+        'non_secure_display_region', 'secure_cdsp_region', 'cdsp_eva_region',
+        'va_md_mem_region', 'vm_comm_mem_region', 'qmc_dma_region',
+    )
+    for name in unused_pools:
+        path = '/reserved-memory/' + name
+        props = tree.get(path, {})
+        if (props.get('compatible') == b'shared-dma-pool\0' and
+                'size' in props and 'reusable' in props and
+                'reg' not in props and 'no-map' not in props and enabled(path)):
             props['status'] = b'disabled\0'
             changes.append(path + ':status')
     path = '/soc/qcom,spmi@c42d000/qcom,pmk8550@0/sdam@7000/sm1510_present@5d'
@@ -589,8 +609,10 @@ def package(args):
                                    ('linux_loader', linux_loader, 'LinuxBoot.efi')):
         shutil.copyfile(source, work / filename)
         require(sha(work / filename) == efi_sources[name]['sha256'], 'Source changed while copying: ' + filename)
-    (work / 'loader.conf').write_text('default debian.conf\ntimeout 0\neditor no\nauto-entries no\nauto-firmware no\nconsole-mode keep\n')
-    (work / 'debian.conf').write_text('title Debian\nefi /EFI/Piano/LinuxBoot.efi\n')
+    (work / 'loader.conf').write_text('default linux.conf\ntimeout 0\neditor no\nauto-entries no\nauto-firmware no\nconsole-mode keep\n')
+    (work / 'linux.conf').write_text('title 启动 Linux\nlinux /EFI/Piano/stable/Image\n'
+                                   'initrd /EFI/Piano/stable/initramfs\n'
+                                   'devicetree /EFI/Piano/stable/board.dtb\n')
     dtb_derivation = None
     if args.cpu_model_overlay:
         require(shutil.which('dtc') and shutil.which('fdtoverlay'), 'CPU model overlay needs dtc and fdtoverlay')
@@ -611,7 +633,7 @@ def package(args):
     esp_files.update({'/EFI/BOOT/BOOTAA64.EFI': work / 'BOOTAA64.EFI',
                       '/EFI/Piano/LinuxBoot.efi': work / 'LinuxBoot.efi',
                       '/loader/loader.conf': work / 'loader.conf',
-                      '/loader/entries/debian.conf': work / 'debian.conf'})
+                      '/loader/entries/linux.conf': work / 'linux.conf'})
     for path in esp_files.values():
         os.utime(path, (max(args.epoch, 315532800),) * 2)  # FAT dates start in 1980.
     esp = output / 'esp.img'

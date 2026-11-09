@@ -1,5 +1,18 @@
 {
   "schema_version": 1,
+  "desktop": {
+    "libfprint": {
+      "url": "https://gitlab.freedesktop.org/libfprint/libfprint.git",
+      "commit": "80a4b5ec612892c5c056c48dddaa561452cf37ec",
+      "version": "1.94.100",
+      "patch_series": "patches/libfprint/1.94.100/series.json"
+    },
+    "fprintd": {
+      "url": "https://gitlab.freedesktop.org/libfprint/fprintd.git",
+      "commit": "b54a007ccf58ac0ae074c7151b223f35cbd17306",
+      "version": "1.94.5"
+    }
+  },
   "sources": {
     "quic-teec": {
       "url": "https://github.com/quic/quic-teec.git",
@@ -9,7 +22,8 @@
     "minkipc": {
       "url": "https://github.com/qualcomm/minkipc.git",
       "commit": "ce145804d9e994e0a7913f8d224d52e84bce6608",
-      "license": "LICENSE.txt"
+      "license": "LICENSE.txt",
+      "patch_series": "patches/minkipc/0.1.0/series.json"
     },
     "qcbor": {
       "url": "https://github.com/laurencelundblade/QCBOR.git",

@@ -4,6 +4,7 @@
 # name encoded as UTF-8 hex plus its length. It never supplies shell paths.
 set -eu
 MODDIR=${0%/*}
+. "$MODDIR/common.sh"
 STATE=/data/adb/piano-sunuefi/storage
 NATIVE="$MODDIR/bin/piano-storage"
 RESIZER="$MODDIR/bin/piano-resize-f2fs"
@@ -48,12 +49,9 @@ progress() {
 android_grow_support() {
   android_grow=false
   libfs_mgr_sha=unknown
-  if [ -r /system/lib64/libfs_mgr.so ]; then
-    libfs_mgr_sha=$(sha256sum /system/lib64/libfs_mgr.so | cut -d ' ' -f 1)
-    # Record the library hash as evidence, not an OTA/version allowlist.
-    if [ -x /system/bin/resize.f2fs ] &&
-       grep -aFq /system/bin/resize.f2fs /system/lib64/libfs_mgr.so; then android_grow=true; fi
-  fi
+  [ ! -r /system/lib64/libfs_mgr.so ] || libfs_mgr_sha=$(sha256sum /system/lib64/libfs_mgr.so | cut -d ' ' -f 1)
+  # The native helper and the manager's early import must both be installed.
+  if piano_android_grow_ready; then android_grow=true; fi
 }
 verify_expansion() {
   if [ ! -f "$RECEIPT" ]; then
@@ -67,7 +65,7 @@ verify_expansion() {
   case "$expected" in ''|*[!0-9]*) echo 'Android 扩容目标容量无效。' >&2; return 1 ;; esac
   [ -n "$created_boot" ] || { echo 'Android 扩容记录缺少启动信息。' >&2; return 1; }
   if [ "$created_boot" = "$(cat /proc/sys/kernel/random/boot_id)" ]; then
-    progress pending_android_expansion 95 '分区空间已归还。请正常重启 Android，完成文件系统扩大。' true true
+    progress pending_android_expansion 95 '分区范围已扩大。请重启，由早期维护完成 Android 文件系统扩容。' true true
     cat "$STATE/$job.progress.json"
     return 0
   fi
@@ -85,9 +83,24 @@ verify_expansion() {
     if [ -f "$STATE/lock/job" ] && [ "$(cat "$STATE/lock/job")" = "$job" ] &&
        [ -f "$STATE/lock/boot" ] && [ "$(cat "$STATE/lock/boot")" != "$(cat /proc/sys/kernel/random/boot_id)" ]; then unlock; fi
   else
-    progress pending_android_expansion 95 '分区空间已归还，Android 文件系统尚未完成扩大。请查看详情后再继续。' false true
+    if piano_android_grow_ready; then
+      progress pending_android_expansion 95 'Android 空间归还尚未完成，请查看早期维护日志后再继续。' false true
+    else
+      progress pending_android_expansion 95 'Android 文件系统尚未扩大，当前模块不能完成此扩容。请勿格式化或重复删除。' false true
+    fi
   fi
   cat "$STATE/$job.progress.json"
+}
+finish_expansion() {
+  [ "${2:-}" = --execute ] || { echo '请明确确认 Android 空间归还。' >&2; return 2; }
+  [ -f "$RECEIPT" ] || { echo '没有待完成的 Android 空间归还。' >&2; return 2; }
+  job=$(sed -n 's/.*"job_id":"\([0-9a-f]*\)".*/\1/p' "$RECEIPT")
+  expected=$(sed -n 's/.*"target_userdata_bytes":\([0-9][0-9]*\).*/\1/p' "$RECEIPT")
+  valid_id "$job" || { echo 'Android 扩容记录无效。' >&2; return 1; }
+  case "$expected" in ''|*[!0-9]*) echo 'Android 扩容目标容量无效。' >&2; return 1 ;; esac
+  check_android
+  piano_android_grow_ready || { echo '早期存储维护尚未安装，请更新模块。' >&2; return 1; }
+  "$RESIZER" grow --expect-bytes "$expected" --execute
 }
 check_android() {
   slot=$(getprop ro.boot.slot_suffix)
@@ -127,7 +140,7 @@ run_job() {
   restart=false
   case "$op" in
     1)
-      progress running 5 '正在刷写 ESP 和 Linux 系统。'
+      progress running 5 '正在刷写所选镜像。'
       "$NATIVE" flash "$plan" --execute > "$STATE/$job.result.json" 2> "$STATE/$job.transfer.log" &
       writer=$!
       while kill -0 "$writer" 2>/dev/null; do
@@ -205,6 +218,9 @@ EOF
       [ -x "$RESIZER" ] || { echo '缺少 Android 扩容检查组件。' >&2; return 1; }
       "$RESIZER" status > "$STATE/$job.f2fs-before-return.json"
       android_grow_support
+      [ "$android_grow" = true ] || {
+        echo '缺少可用的早期存储维护，未删除独立分区。' >&2; return 1;
+      }
       progress running 70 '正在删除 SunUEFI 分区，将空间归还 Android。'
       "$NATIVE" apply "$plan" "$STATE/$job.gpt-backup" --execute > "$STATE/$job.result.json"
       printf '{"schema_version":1,"job_id":"%s","target_userdata_bytes":%s,"created_boot_id":"%s","gpt_written":true,"pending_android_expansion":true,"android_grow_detected":%s,"libfs_mgr_sha256":"%s"}\n' \
@@ -212,13 +228,14 @@ EOF
       chmod 600 "$RECEIPT.tmp"
       mv "$RECEIPT.tmp" "$RECEIPT"
       sync
-      progress pending_android_expansion 95 '分区空间已归还。请正常重启 Android，完成文件系统扩大。' true true
+      "$RESIZER" grow --expect-bytes "$userdata_bytes" --execute > "$STATE/$job.early-maintenance.json"
+      progress pending_android_expansion 95 '分区范围已扩大。请重启，由早期维护完成 Android 文件系统扩容。' true true
       return 0
       ;;
     *) echo '不支持此存储操作。' >&2; return 1 ;;
   esac
   case "$op" in
-    1) message='ESP 和 Linux 已写入，读回检查完成。' ;;
+    1) message='所选镜像已写入，读回检查完成。' ;;
     2) message='分区已建立。请正常重启，再刷写 ESP 和 Linux 镜像。' ;;
     3) message='root 容量已调整。需要重启时，请正常重启后继续。' ;;
     4) message='SunUEFI 分区已删除，Android 数据分区保持原大小。' ;;
@@ -227,6 +244,9 @@ EOF
 }
 
 case "${1:-}" in
+  finish-expansion)
+    finish_expansion "$@"
+    ;;
   verify-expansion)
     verify_expansion
     ;;
@@ -241,13 +261,25 @@ case "${1:-}" in
     ;;
   plan)
     operation=${2:-}; value=${3:-}
+    images=
     case "$operation" in
-      create|resize) case "$value" in 32|64|128|256) ;; *) echo '请选择 32、64、128 或 256 GiB。' >&2; exit 2 ;; esac ;;
-      flash|delete|delete-return) value=0 ;;
+      create|resize) case "$value" in 32|64|128|256|512) ;; *) echo '请选择 32、64、128、256 或 512 GiB。' >&2; exit 2 ;; esac ;;
+      flash)
+        images=${value:-both}
+        case "$images" in esp|root|both) ;; *) echo '请选择本次更新的镜像。' >&2; exit 2 ;; esac
+        value=0
+        ;;
+      delete|delete-return) value=0 ;;
       *) echo '不支持此存储操作。' >&2; exit 2 ;;
     esac
     lock; trap 'unlock' EXIT
     job=$(new_id); valid_id "$job"
+    if [ "$operation" = delete-return ]; then
+      android_grow_support
+      [ "$android_grow" = true ] || {
+        echo '缺少可用的早期存储维护，不能删除并归还空间。' >&2; exit 1;
+      }
+    fi
     section_bytes=
     if [ "$operation" = create ] && [ -x "$RESIZER" ] &&
        "$RESIZER" status > "$STATE/$job.userdata.json" 2> "$STATE/$job.userdata-status.log"; then
@@ -259,7 +291,9 @@ case "${1:-}" in
       # 2199023255040 upper bound to -512, rejecting even 512-block sections.
       # piano-storage validates this uint64 value again before planning.
     fi
-    if [ -n "$section_bytes" ]; then
+    if [ "$operation" = flash ]; then
+      "$NATIVE" plan flash 0 "$STATE/$job.plan" --images "$images" > "$STATE/$job.description.json"
+    elif [ -n "$section_bytes" ]; then
       "$NATIVE" plan "$operation" "$value" "$STATE/$job.plan" --userdata-section-bytes "$section_bytes" > "$STATE/$job.description.json"
     else
       "$NATIVE" plan "$operation" "$value" "$STATE/$job.plan" > "$STATE/$job.description.json"
@@ -273,6 +307,9 @@ case "${1:-}" in
       [ -x "$RESIZER" ] || { echo '当前模块缺少 Android 扩容检查组件。' >&2; exit 1; }
       "$RESIZER" status > "$STATE/$job.f2fs-before-return.json"
       android_grow_support
+      [ "$android_grow" = true ] || {
+        echo '缺少可用的早期存储维护，不能删除并归还空间。' >&2; exit 1;
+      }
       printf '{"plan_id":"%s","android_grow_detected":%s,%s\n' "$job" "$android_grow" "$(sed 's/^{//' "$STATE/$job.description.json")"
     else
       printf '{"plan_id":"%s",%s\n' "$job" "$(sed 's/^{//' "$STATE/$job.description.json")"
@@ -322,5 +359,5 @@ case "${1:-}" in
     fi
     cat "$STATE/$job.progress.json"
     ;;
-  *) echo 'Usage: storage-operations.sh select esp|root NAME_HEX BYTES | plan OP [GiB] | execute PLAN_ID --confirm | job JOB_ID' >&2; exit 2 ;;
+  *) echo 'Usage: storage-operations.sh select esp|root NAME_HEX BYTES | plan flash [esp|root|both] | plan OP [GiB] | execute PLAN_ID --confirm | job JOB_ID' >&2; exit 2 ;;
 esac

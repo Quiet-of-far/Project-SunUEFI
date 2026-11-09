@@ -49,7 +49,7 @@ PianoProductCoreEntry (uefi/core/PianoProductCore.c)
 
 1. **USB 控制器断开**：停止 DWC3 端点传输，清空事件环，释放 USB DMA 缓冲区；USB 口处于主机模式时，先断开 USB 设备驱动，停止并复位 xHCI；
 2. **UFS 存储安全退出**：完成已排队的传输，同步缓存，安全断开 UFS 控制器通道；
-3. **时钟与电源释放**：释放显示时钟；磁吸键盘的 MCU 回到复位，恢复 L11B/L14B 的 RPMh 投票、引脚和 SE6 寄存器；触屏恢复引脚和 SE2 寄存器；再释放 QUP1 时钟引用。键盘和触屏不使用 DMA，没能恢复的项目记入日志，交接继续；
+3. **时钟与电源释放**：释放显示时钟；磁吸键盘的 MCU 回到复位，恢复 L11B/L14B 的 RPMh 投票、引脚和 SE6 寄存器；触屏恢复引脚和中断配置；再释放 QUP1 时钟引用。键盘和触屏不使用 DMA，但输入协议、引脚、电源或时钟没能恢复时同样拒绝交接；
 4. **SMMU 保护解除**：安全解绑 DMA 地址映射，释放页表；
 5. **安全拒绝交接**：使用 DMA 的设备（USB、UFS、显示）在任何一步无法确认已干净停止时，固件拒绝交接并保持当前状态，严禁强行释放可能仍在被硬件 DMA 访问的物理内存。
 
@@ -70,8 +70,8 @@ PianoProductCoreEntry (uefi/core/PianoProductCore.c)
 
 固件整合了定制的 SimpleInit 图形菜单，针对 3200×2136 分辨率的平板屏幕进行四倍字体放大：
 
-* **交互操作**：支持实体按键操作，音量＋/－键移动焦点，电源键确认，双击音量键返回；官方磁吸键盘、触控板和触屏在后台初始化后可用，见 [UEFI 设置页面](boot/uefi-console.md#官方磁吸键盘与触控板)；
-* **菜单选项**：启动 Linux、进入 Android、固件设置（Setup）、命令行（Shell）；
+* **交互操作**：音量＋/－键移动焦点，电源键确认，同时按两侧音量键返回。其他输入的使用限制见[已知问题](../user/known-issues.md#uefi-菜单与-usb)，后台初始化和标准协议见 [UEFI 设置页面](boot/uefi-console.md#官方磁吸键盘与触控板)；
+* **菜单选项**：默认选择“启动 Linux”；“从文件启动”可选择 EFI 应用，另有固件设置、UEFI Shell、文件管理器、工具、UEFI 启动项及电源操作；
 * **进度显示**：启动画面实时显示底层硬件初始化的分阶段进度，避免长时间黑屏。
 
 ## ESP 启动文件与系统交接
@@ -89,6 +89,8 @@ PianoProductCoreEntry (uefi/core/PianoProductCore.c)
 ESP 中的 Linux `boot.img` 总容器上限为 128 MiB，打包入口 `./build.sh package` 和 `./build.sh esp` 会核对该上限。initramfs 的压缩后上限仍为 16 MiB，内核和设备树仍须满足各自的交接窗口。UEFI Fastboot 的单次 USB 下载上限保持 64 MiB，超过此大小的 Linux 容器需从 ESP 启动。
 
 两种路径的 `ExitBootServices` 都使用当前最内层启动应用的真实句柄和已保存的加载身份。标准 EFI 路径还检查该应用到当前 systemd-boot 的父链及 ESP 身份。开始关闭资源前的拒绝允许启动管理器重试其他内核；进入关闭流程后出错便停止，不能返回仍可能持有文件句柄的 systemd-boot。MapKey 变化后的重试不再进行文件操作、分配或重复关闭硬件。
+
+固件的四个 EFI 时间调用返回 `EFI_UNSUPPORTED`，并通过 `EFI_RT_PROPERTIES_TABLE` 报告；不发布占位 EFI RTC。Linux 使用 PMIC RTC，UEFI 只读原厂 `persist/time/ats_2`，通过保留内存中的标准 NVMEM 单元传入日历偏移，见 [RTC 与原厂时间](hardware/sleep.md#rtc-与原厂时间)。
 
 ## UEFI 核心代码结构
 

@@ -52,6 +52,8 @@ def stage(args):
         shutil.rmtree(current_modules)
     modules.stage(root, args.kernel, old_modules)
     runtime.stage(args.runtime.resolve(), root)
+    from build_piano_fingerprint import install_desktop
+    install_desktop(root, args.runtime.resolve(), output / 'fingerprint-packages')
     fw = ROOT / cfg['firmware']['source']
     from stage_piano_firmware import stage as stage_firmware
     stage_firmware(fw, root)
@@ -67,8 +69,7 @@ def stage(args):
     for name in ('piano-sensors-import', 'adsprpcd-sensorspd'):
         text = (sensor / ('debian/piano-sensors.' + name + '.service')).read_text()
         if name == 'adsprpcd-sensorspd':
-            text = text.replace('Requires=piano-sensors-import.service',
-                                'Requires=piano-sensors-import.service piano-adsp.service')
+            text = text.replace(' piano-adsp.service', '')
         put(root, 'usr/lib/systemd/system/' + name + '.service', text)
     put(root, 'usr/lib/systemd/system/iio-sensor-proxy.service.d/piano.conf',
         (sensor / 'iio-sensor-proxy-piano.conf').read_text())
@@ -119,10 +120,8 @@ def stage(args):
         guest(['systemctl', 'mask', 'hibernate.target',
                'hybrid-sleep.target', 'suspend-then-hibernate.target',
                'adsprpcd.service', 'adsprpcd_audiopd.service'])
-        # Drivers use modalias probing; udev starts touch when its stream exists.
         guest(['systemctl', 'enable', 'greetd', 'NetworkManager', 'sshd', 'bluetooth',
-               'piano-adsp', 'piano-camerad',
-               'piano-hostkeys', 'adsprpcd-sensorspd'])
+               'piano-camerad', 'piano-hostkeys', 'adsprpcd-sensorspd'])
         guest(['systemctl', 'set-default', 'graphical.target'])
         guest(['depmod', '-a', kernel['kernel_release']])
         guest(['niri', 'validate', '--config', '/home/piano/.config/niri/config.kdl'])

@@ -19,8 +19,7 @@ class HardwareStagingTests(unittest.TestCase):
         self.workspace = Path(temporary.name)
         shutil.copytree(ROOT / 'linux/bsp/common',
                         self.workspace / 'linux/bsp/common', symlinks=True)
-        for name in ('linux/userspace/piano-adsp-start',
-                     'linux/userspace/piano-ram-hardware-prepare',
+        for name in ('linux/userspace/piano-ram-hardware-prepare',
                      'tools/check_piano_kernel_dma_routes.py',
                      'tools/check_piano_kernel_contexts.py'):
             target = self.workspace / name

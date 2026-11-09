@@ -19,6 +19,8 @@ class ProductBootLogLifecycleTests(unittest.TestCase):
                     WS / 'Silicon/Qualcomm/QcomPkg/Include',
                     WS / 'Silicon/Silicium/SiliciumPkg/Include',
                     ROOT / 'uefi/components/guarded-read',
+                    ROOT / 'uefi/components/board-identity',
+                    ROOT / 'uefi/components/rtc',
                     ROOT / 'uefi/components/product-handoff/Mu_Basecore/MdePkg/Include',
                     ROOT / 'uefi/components/nv',
                     ROOT / 'uefi/components/reset',

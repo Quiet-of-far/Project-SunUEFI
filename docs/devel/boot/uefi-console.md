@@ -29,15 +29,27 @@ SimpleInit 提供触摸尺寸的图形菜单；TianoCore 设置页面使用 UEFI
 Shell 首次连接曾发生 bulk IN 响应停滞，重新连接行为仍需修正。
 磁吸键盘和触控板、触屏见后面两节。
 
+SimpleInit 的键盘、相对指针和触屏读取器始终注册，即使启动时尚无该设备。
+每次读取先枚举标准协议，删除已经拔出的句柄；在 `TPL_CALLBACK` 内重新查找
+协议并读取，防止 USB 拔出在查询和调用之间释放接口。不再留下指向已退出
+SimpleInit 的协议安装通知。USB 键盘沿用 UsbKbDxe，固件设置和 Shell 沿用
+标准控制台，不另外接入 HID。
+
+键盘优先读取 `SimpleTextInEx`，没有该协议时读取 `SimpleTextIn`。Tab 和
+Shift+Tab 切换焦点，方向键在编辑状态保留各自方向，Home、End、Delete
+传给控件；每个键后向 LVGL 发送一次释放，连续相同按键不会合并。音量键
+仍可代替左右调节，电源键确认；输入框编辑时空格保留为空格。
+
 ## 官方磁吸键盘与触控板
 
-固件在后台初始化键盘套里的 Nanosic WN8030 微控制器，进入菜单后大约
-1.5 秒接入，这段时间和之后音量键、电源键照常可用。键盘以标准
+固件在后台初始化键盘套里的 Nanosic WN8030 微控制器，实机进入菜单后约
+10 秒完成固件下载，这段时间和之后音量键、电源键照常可用。键盘以标准
 `SimpleTextIn` 和 `SimpleTextInEx` 发布，并带 `ConsoleInDevice` 标记，
 SimpleInit、固件设置和 Shell 都通过标准控制台读到它。顶排没有功能键，
 右 Ctrl 加 `1` 到 `0`、`-`、`=` 输出 F1 到 F12，与 Linux 相同，因此
 右 Ctrl + `=` 是 F12，可以进入固件设置。Caps Lock 灯跟随锁定状态，
-按键不自动连发。实现已编译进产品镜像，尚未在平板上验证。
+按键不自动连发。实机已确认 MCU 固件校验、键盘套连接识别和运行命令，
+物理按键及触控板操作仍未验证。
 
 触控板以标准 `SimplePointer` 发布：单指移动光标，轻点一下是左键，
 按下触控板是左键或右键。它不作为绝对坐标设备发布，因为菜单会把绝对
@@ -54,6 +66,11 @@ wrapper 与 SE6 的时钟，GPIO56/57 复用到 SE6；GPIO188 复位和 GPIO3 �
 报告。键盘接上时发送打开触控板和键盘供电的命令，此后每 12 秒重发键盘
 供电请求。整个过程是由共享 pump 推进的状态机，只在等待事件和菜单刷新时
 运行，每次最多执行一次 I²C 传输，不会阻塞菜单、设置、Shell 或 Fastboot。
+
+一帧可以连续包含多个报告；ID 为零表示报告结束，后面未使用的缓冲区不要求
+清零，与 Linux 驱动的停止条件一致。报告大小和触点范围继续逐项检查，截断
+或不支持的报告不会提交半帧按键。`PIANO_POGO_INPUT` 汇总接受、拒绝、连接
+状态和命令结果，不记录认证材料。
 
 传输使用 SE6 的 GENI I²C FIFO 接口，1 MHz，由 CPU 轮询，不使用 DMA，
 所以不新增 SMMU 上下文。SE6 必须已经由引导程序载入 I²C 协议固件并开放
@@ -74,8 +91,7 @@ Linux 根系统使用的同一文件；`tools/prepare_product.py` 按该仓库�
 和复位，等待 10 ms，恢复 L14B、L11B 的原 RPMh 投票，恢复引脚和 GPIO97
 的中断配置，恢复 SE6 寄存器，最后释放本固件持有的时钟引用。Linux 驱动
 探测时会重新上电、复位并下载固件，看到的状态与其他启动方式相同。这条
-路径不使用 DMA，也没有 SMMU 上下文，某一项没能恢复时不阻止启动：日志里的
-`PIANO_POGO_RELEASE` 列出没有恢复的项目。输入协议、引脚、电源或时钟未能安全退出时拒绝交接，保留资源并显示恢复操作。
+路径不使用 DMA，也没有 SMMU 上下文。`PIANO_POGO_RELEASE` 列出没有恢复的项目；输入协议、引脚、电源或时钟未能安全退出时拒绝交接，保留资源并显示恢复操作。
 
 源码位置：
 
@@ -87,18 +103,19 @@ Linux 根系统使用的同一文件；`tools/prepare_product.py` 按该仓库�
 
 屏幕的 NT36532E 是触控与显示一体的芯片，没有内置触控固件。固件在后台
 给它下载触控固件，完成后触屏以标准 `AbsolutePointer` 发布，坐标范围与 3200×2136 横屏画布相同，SimpleInit 直接用它点按。
-只跟踪一个触点。SimpleInit 把每个新坐标都当成一次点按，所以每次触摸只在
-抬起时报告一次，位置取按下点；移动超过一个传感器间距的触摸不算点按，
-菜单里不能拖动或滚动，多指手势也不可用。实现已编译进产品镜像，尚未在平板上验证。
+只跟踪一个触点，按标准协议分别报告按下、移动和抬起；抬起保留最后坐标，
+不修改坐标制造新事件。SimpleInit 同时检查坐标和按钮状态。实机能够下载
+固件并建立矩阵基线，但手触后大帧校验持续失败，尚不能用于菜单点按。
 
 初始化严格按 Linux 7.3 `nt36xxx` 驱动在“没有可跟随的 DRM 面板”时的探测
 顺序进行，这正是屏幕已由引导程序点亮时的情形：写 `0x7FFF80 = 0x5A`
 做引擎复位，等 10 ms；依次用三组芯片 ID 寄存器读取并匹配 NT36532，每组
 最多 5 次，每次先做 bootloader 复位；读 `ENB_CASC` 判断单芯片或级联；
 然后执行 `nvt_download_firmware_hw_crc`：bootloader 复位，写 ILM/DLM 的
-目标地址、长度和 CRC，打开自动复制，按 63 KiB 分块写入全部分区，等待
+目标地址、长度和 CRC，打开自动复制，按 512 字节分块写入全部分区，等待
 自动复制完成，打开固件 CRC 校验，置 `BOOT_RDY`，确认复位状态在
-`0xA0`–`0xAF`，失败时整体重试，共 3 次；最后读取帧长度和固件信息。
+`0xA0`–`0xAF`，失败时整体重试，共 3 次；最后读取帧长度和固件信息，等待校准
+状态 `0xA3` 后，按原厂 `DATA_MODE_53` 发送 idle 扫描命令并等待确认。
 与 Linux 驱动一样，不操作任何复位 GPIO、稳压器或面板命令。
 
 触控固件按 GPIO100（触控 lcd-id）选择：0 用
@@ -109,17 +126,20 @@ Linux 根系统使用的同一文件；`tools/prepare_product.py` 按该仓库�
 `firmware/SHA256SUMS` 核对后嵌入，`PIANO_TOUCH_FIRMWARE` 日志记录所选
 文件的 SHA-256。
 
-传输使用 QUP1 SE2 的 GENI SPI FIFO 接口，模式 0，最高 19.2 MHz，由 CPU
-轮询，不使用 DMA。SE2 只开放 GSI 接口时，固件只读取状态，触屏在 UEFI
-中不可用，日志写 `se2-gsi-only`。运行时在 GPIO162 的上升沿读取一帧原始
-矩阵（最多每秒约 60 帧），算法移植自 `piano-touch-view`：锁定非笔的
+SE2 只开放 GSI 接口，产品不改写该接口，使用 GPIO40/41/42/43 的模式 0
+软件 SPI，不使用 DMA。保留引脚配置，退出时恢复。运行时通过 GPIO162
+的上升沿锁存状态读取一帧原始矩阵；没有锁存事件时低频轮询。每次重新寻址
+读取 64 字节并释放片选，避免长片选阻塞触控固件；整帧仍须通过校验，
+读取期间被覆盖的帧直接丢弃。
+算法移植自 `piano-touch-view`：锁定非笔的
 主帧类型，取 32 帧中值作基线，去除行列共模噪声，在 3×3 邻域找超过阈值
 200 的峰并求加权质心，再映射到屏幕坐标（Y 轴翻转）；静止时基线缓慢跟随
-漂移。pump 只在等待事件和菜单刷新时推进触屏：下载期间每次写一个分块（19.2 MHz
-下约 30 ms），之后每次最多读一帧。
+漂移。pump 只在等待事件和菜单刷新时推进触屏：下载期间每次写一个分块，之后每次最多读一帧。软件 SPI 读取 BOE 的 5449 字节帧约需 45 ms；这不是已实现的触点上报速率。
+USB bulk 传输或排队事件优先处理，期间暂停同步输入读取，避免大帧上传被
+软件 SPI 阻塞到电脑端超时；传输结束后恢复输入探测与轮询。
 
 失败时固件释放已占用的资源，不发布触屏，`PIANO_TOUCH_UNAVAILABLE` 写明
-步骤和原因，例如 `se2-gsi-only`、`chip-id`、`firmware-start` 或
+步骤和原因，例如 `chip-id`、`firmware-start` 或
 `transport`；`PIANO_TOUCH_SE2`、`PIANO_TOUCH_CHIP_ID`、
 `PIANO_TOUCH_DOWNLOAD`、`PIANO_TOUCH_READY` 记录各阶段结果。连续出现看门狗
 帧时按 Linux 的做法重新下载。
@@ -131,8 +151,7 @@ Linux 根系统使用的同一文件；`tools/prepare_product.py` 按该仓库�
 
 源码位置：
 
-* `uefi/components/touch-product/PianoTouchService.c`：资源占用与释放、探测与下载状态机、`AbsolutePointer`。
-* `uefi/components/touch-product/PianoGeniSpiPio.c`：GENI SPI FIFO 传输。
+* `uefi/components/touch-product/PianoTouchService.c`：GPIO SPI、资源占用与释放、探测与下载状态机、`AbsolutePointer`。
 * `uefi/components/touch-product/PianoTouchNvt.c`：固件分区解析与芯片表。
 * `uefi/components/touch-product/PianoTouchMatrix.c`：原始矩阵到触点。
 
@@ -145,9 +164,10 @@ SimpleInit/LVGL 处理，物理显示模式保持原样；实机已确认横屏�
 是 Android 格式的 Linux 启动包，不能直接当作 EFI 应用交给标准启动管理器。
 产品现在先查找 ESP 和启动文件，再登记一个指向固件内
 `PianoLinuxBoot.efi` 的 Linux 启动项。该应用向驻留核心请求启动，
-随后进入 ESP 中的 systemd-boot。systemd-boot 的 Debian 条目加载 ESP 中
-同一份 `LinuxBoot.efi`，通过 APP 接口同步进入核心的文件加载与安全交接，
-不再排队或递归启动管理器。具体内存与退出身份见 [UEFI 核心](../uefi-core.md#esp-启动文件与系统交接)。
+随后进入 ESP 中的 systemd-boot。默认 `linux.conf` 直接加载内核 EFI stub、
+initramfs 和 DTB；旧启动项仍可加载 ESP 中的 `LinuxBoot.efi`，通过 APP
+接口同步进入核心读取 `boot.img`，不递归启动管理器。具体内存与退出身份见
+[UEFI 核心](../uefi-core.md#esp-启动文件与系统交接)。
 
 入口在启动时发现并登记，普通非易失变量通过下文的文件后端保存。
 标准 EFI 启动项可以用 `linux`、`initrd`、`devicetree` 直接装载 Linux EFI stub。
@@ -286,11 +306,12 @@ USB0 的 SMMU 页表：XhciDxe 的环和上下文放在改成非缓存（`EFI_ME
 U 盘在 UEFI 里只读。固件补丁让 UsbMassStorageDxe 的 `WriteBlocks` 直接返回
 写保护，并把介质报告为只读，不会向 U 盘发送 WRITE 命令。
 
-固件不控制 VBUS。原厂 PmicDxe 的 VBUS 开关函数是空函数，原厂 UEFI 也不写
-OTG 命令寄存器，所以这里不新增 PMIC 写入。PMIC 是否会自行给不带电源的设备
-供电还没有实机结论；每次 Type-C 状态变化时，日志 `SUNUEFI_USB_TYPEC_POWER`
-记录 DCDC 和 USBIN 的只读状态，`SUNUEFI_USB_TYPEC_MODE` 记录 Type-C 端口模式
-配置，用来判断有没有输出 5 V、端口是否只作受电方。
+固件尚未控制 VBUS 或 Type-C 端口模式。原厂 PmicDxe 的 VBUS 开关函数为空；
+实机进入 UEFI 时 Type-C `+0x44` 为 `0x02`（只受电），仅检测 Rd 不能补齐
+普通 OTG 设备的供电和角色切换。Linux 则通过 ADSP 的 PMIC GLINK／UCSI 和
+MCA 控制充电及 OTG 通路，不能直接用旧版 PMIC 的升压寄存器布局替代。
+每次 Type-C 状态变化时，`SUNUEFI_USB_TYPEC_POWER` 记录 DCDC 和 USBIN
+的只读状态，`SUNUEFI_USB_TYPEC_MODE` 记录端口模式。外设供电及枚举仍未验证。
 
 不做 USB PD 协商，也不交换数据角色：带电源的 USB-C 扩展坞给平板供电时，
 平板是受电方和设备，扩展坞上的设备不会出现。QMP PHY 的通道方向沿用开机时

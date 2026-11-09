@@ -94,9 +94,9 @@ def add_licenses_and_records(output, sysroot, records):
         # to a recipient of the ZIP, without embedding any proprietary input.
         for name in ('android/native/piano-boot-repack.c', 'android/native/piano-boot-request.c',
                      'android/native/piano-bootloader.c', 'android/native/piano-bootloader.h',
-                     'android/native/piano-storage.c', 'android/native/piano-bluetooth-provision.c',
-                     'android/native/piano-bluetooth-provision.h', 'android/native/jsmn.h',
+                     'android/native/piano-storage.c', 'android/native/jsmn.h',
                      'android/native/jsmn-source.json', 'tools/android/piano_resize_f2fs.c',
+                     'tools/android/piano_f2fs_grow.c', 'tools/android/piano_f2fs_grow.h',
                      'uefi/handoff/bootselect/BootRequest.c', 'uefi/handoff/bootselect/BootRequest.h',
                      'tools/build_android_product_module.py', 'tools/build_boot_repack.py',
                      'tools/build_boot_request.py', 'tools/build_storage.py',
@@ -178,8 +178,6 @@ def build(args):
                'installation': 'Extract and retain the current active-slot Android GKI; adopt a matching core or upgrade an owned previous core',
                'ota': 'The helper can repack a supported current-ROM stock BOOT after OTA',
                'qualification': 'Build records do not mark unperformed native or device tests as passed'}
-    with zipfile.ZipFile(pending_zip, 'a', zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr('licenses/COPYING.libfdt', (work / 'storage/COPYING.libfdt').read_bytes())
     add_licenses_and_records(pending_zip, sysroot, records)
     with zipfile.ZipFile(pending_zip) as archive:
         if archive.testzip() is not None:

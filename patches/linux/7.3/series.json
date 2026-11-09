@@ -4,8 +4,8 @@
   "kernel_version": "7.3.3",
   "base_commit": "d50d994bffa3c7c6db2d8bc4c5f0c55e3f46b0cd",
   "base_tree": "a3d0b8db615452e89f37be4454c80262c06ecc99",
-  "target_tree": "28268dab4f5ce0ced78ed8d7d26d77c782a92fb6",
-  "original_target_commit": "ab30d46f2614c9bd213fcb37de326b1b41392b0a",
+  "target_tree": "8aec2afab2331f9e5e1ba45c5b4956b3b7148bea",
+  "original_target_commit": "e07756dee79fecc6e85a54c8f0bdb957bfbccfb1",
   "source_url": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
   "patches": [
     {
@@ -313,36 +313,394 @@
       "tree": "fb5188400ffbc68d3077c335b2949624293e5cdf"
     },
     {
-      "file": "0039-pcie-power-before-phy.patch",
-      "sha256": "1cdb5e87d1f1fb4457fe404bc26babe64193491469e96d72f734368dcbd1374f",
-      "original_commit": "912b80ad574e53ebcad7bfe3d18f86edc59fc5a2",
+      "file": "0039-pcie-phy-reset-sequence.patch",
+      "sha256": "c7b4fc4d317cf89f9ec05b5c6e2fa5b9ec6703346989a45ceeff34d270dbba82",
+      "original_commit": "8729f36c837554f6c3d945bb5194c1d10868c640",
       "original_parent": "8e2cebb69ec3b78c73a72fda4630ee51437a70c6",
-      "committer_date": "2026-11-08T01:57:31+08:00",
-      "tree": "1ea302d3917a73f351469f70afbc27f79617bbd7"
+      "tree": "ea75460d10bce692af9c77d8a6479ee73f1da2ad",
+      "committer_date": "2026-11-08T02:32:50+08:00"
     },
     {
-      "file": "0040-qmp-pcie-teardown-reset.patch",
-      "sha256": "d01290e2cf35b75badb067c35f77de86c1f6225b778e864a9e93857ec15c4407",
-      "original_commit": "7c7ed30f6b9410e96b9865de5decd6215729aad7",
-      "original_parent": "912b80ad574e53ebcad7bfe3d18f86edc59fc5a2",
-      "committer_date": "2026-11-08T01:57:32+08:00",
-      "tree": "5a380e5cd822b131296bded3a825167a61fb00e2"
+      "file": "0040-pmic-glink-freezable-work.patch",
+      "sha256": "55b67efdfcb8d8679b3809fc3da44b812baa661de9496b481f3fdf0b48154143",
+      "original_commit": "b69346db8b755fb0659ef37571acbf7b11ceff31",
+      "original_parent": "8729f36c837554f6c3d945bb5194c1d10868c640",
+      "tree": "afda4434402d45ae96dce5dedfb632e1fc6d1a65",
+      "committer_date": "2026-11-08T02:32:50+08:00"
     },
     {
-      "file": "0041-pmic-glink-freezable-work.patch",
-      "sha256": "ab2e7586514f3fa73dac376dc877ff797951972303725b612ff5b8e8a0d09999",
-      "original_commit": "e342dba15282933ef9c5efd9a85f01d13ad024f0",
-      "original_parent": "7c7ed30f6b9410e96b9865de5decd6215729aad7",
-      "committer_date": "2026-11-08T01:57:32+08:00",
-      "tree": "221976dba31bea0ab7be5cee3cc5caa5628e2656"
+      "file": "0041-ir-spi-binding.patch",
+      "sha256": "eb5bff757c7280794126898be9a114cafa6c87a858bad8f2c7dac55936546279",
+      "original_commit": "b28bbbf75eba03aba9fb4e5510753ce67aa7aa12",
+      "original_parent": "b69346db8b755fb0659ef37571acbf7b11ceff31",
+      "tree": "e2d264517f5cd995be31a2c84fe0603672b606e1",
+      "committer_date": "2026-11-08T02:39:10+08:00"
     },
     {
-      "file": "0042-power-piano-charge-limit.patch",
-      "sha256": "73a500aedcef55b2c11dbdce7d3137f5da4089df1fa4912c5a251204d7944523",
-      "original_commit": "ab30d46f2614c9bd213fcb37de326b1b41392b0a",
-      "original_parent": "e342dba15282933ef9c5efd9a85f01d13ad024f0",
-      "committer_date": "2026-11-08T18:07:12+08:00",
-      "tree": "28268dab4f5ce0ced78ed8d7d26d77c782a92fb6"
+      "file": "0042-ir-spi-transmitter.patch",
+      "sha256": "f45ec9383fa9d2b0a7fe70d4c30d44b4d2bdfe604fdbcadf9d6864824dd2a89c",
+      "original_commit": "a8d7d1acf871332420559aa8d0ee01ce38ad3458",
+      "original_parent": "b28bbbf75eba03aba9fb4e5510753ce67aa7aa12",
+      "tree": "d2e1e313249426d2148c02a7ffeecfaa1eba963f",
+      "committer_date": "2026-11-08T02:39:10+08:00"
+    },
+    {
+      "file": "0043-spi-geni-dma-idle.patch",
+      "sha256": "7f35d953abf9470979e1e1394f2a0f4f03960e77418e84369c08406c29dde3e6",
+      "original_commit": "d59d22ed68f54887a2e99b72653e83955eb68ee0",
+      "original_parent": "a8d7d1acf871332420559aa8d0ee01ce38ad3458",
+      "tree": "85f8318d06ac37ca04aaa5e6a352769976021ac3",
+      "committer_date": "2026-11-08T02:39:10+08:00"
+    },
+    {
+      "file": "0044-s5kjn1-crop-height.patch",
+      "sha256": "6a1c9d50483cbc1ca890d65b01c2a0b73de97014d0092939fc0a14773c4c198d",
+      "original_commit": "6e550da618aa0491a034cc4d88d00f2443733856",
+      "original_parent": "d59d22ed68f54887a2e99b72653e83955eb68ee0",
+      "tree": "ace9b61be0781732a2dc00eb0f7e239459c6d9f5",
+      "committer_date": "2026-11-08T02:39:11+08:00"
+    },
+    {
+      "file": "0045-s5kjn1-factory-modes.patch",
+      "sha256": "8ab62752819181b8aefd381a4e825d44c358069fd3c44d60cd6235d35c844476",
+      "original_commit": "e486633ae39877f402aba5521cebd5b6f97ab249",
+      "original_parent": "6e550da618aa0491a034cc4d88d00f2443733856",
+      "tree": "8e676ca1e9db737c027efd764945bdc2c8b3477b",
+      "committer_date": "2026-11-08T02:39:11+08:00"
+    },
+    {
+      "file": "0046-ov32d40-mode-timing.patch",
+      "sha256": "2671212a0764c6061039b547471f281aee70fb9c0fd6d7d6f76d1b38e4193f46",
+      "original_commit": "87be85142db7745c7c0796694664d5beb7cc4eb0",
+      "original_parent": "e486633ae39877f402aba5521cebd5b6f97ab249",
+      "tree": "27017d3c6a3041ad2e8868960c6e68621bddc9a8",
+      "committer_date": "2026-11-08T02:39:11+08:00"
+    },
+    {
+      "file": "0047-camss-full-height-nv12.patch",
+      "sha256": "41e367ab4b01ab4e91603f39330a86710ad79cd483c625ef5ddf8e6e7bcfde7b",
+      "original_commit": "22ba6824a204ca62b4a26a0faccf966a8a3fc055",
+      "original_parent": "87be85142db7745c7c0796694664d5beb7cc4eb0",
+      "tree": "3a0f5e97f0ba987db6c6ea3b7912fef4e24eb70d",
+      "committer_date": "2026-11-08T02:39:11+08:00"
+    },
+    {
+      "file": "0048-camss-frame-timestamps.patch",
+      "sha256": "6e75affc2915858895bbb5ac73c947f8edfd765e80a962e4d97a6238f3004307",
+      "original_commit": "cd13886a3b5e3145115a1f24793dc6a330e57430",
+      "original_parent": "22ba6824a204ca62b4a26a0faccf966a8a3fc055",
+      "tree": "6928f160cd3ba5616812aab46a980df7bcb2f7c2",
+      "committer_date": "2026-11-08T02:39:12+08:00"
+    },
+    {
+      "file": "0049-camss-tfe-bus-errors.patch",
+      "sha256": "593af9e64bb7c3e1d55a0bad68205469d3bf7ddc8e022815395984524308f2f7",
+      "original_commit": "a858076ac1acdd26fb8b1e9d185dd963a4277aa7",
+      "original_parent": "cd13886a3b5e3145115a1f24793dc6a330e57430",
+      "tree": "8ccb21447031e0e6d002aa64b0d7c386a5efc096",
+      "committer_date": "2026-11-08T02:39:13+08:00"
+    },
+    {
+      "file": "0050-s5kjn1-readonly-hblank.patch",
+      "sha256": "14a1da394df8524cba045bdff72a9492d8d1b0ef95f903d1405db9b5d0e83c86",
+      "original_commit": "38a49872335f5d9c785065431078b208a8739028",
+      "original_parent": "a858076ac1acdd26fb8b1e9d185dd963a4277aa7",
+      "tree": "838e58989213716613f967dedde2402b366ca002",
+      "committer_date": "2026-11-08T02:39:14+08:00"
+    },
+    {
+      "file": "0051-camss-pix-alignment.patch",
+      "sha256": "02401fb002b043dd1debd573332e220e5335474bc1f61cb9231ec0b824f72c1d",
+      "original_commit": "3f3f891dcfc4262996f62591617fe68bb985c320",
+      "original_parent": "38a49872335f5d9c785065431078b208a8739028",
+      "tree": "b9bf0e5a1ce1a7ab8448197912bd8d9f7dce9e8f",
+      "committer_date": "2026-11-08T02:39:15+08:00"
+    },
+    {
+      "file": "0052-dpu-gcv2-dark-range.patch",
+      "sha256": "058d645a675e2db091079aa700f21351285ac9f1185c20c92f4cf2741aea9b8c",
+      "original_commit": "0482074eb3ce93bdd2a4dc070b483f45ad5479fb",
+      "original_parent": "3f3f891dcfc4262996f62591617fe68bb985c320",
+      "tree": "3b1bf03e435d78734ad41f534494e36cf430d9ca",
+      "committer_date": "2026-11-08T16:06:02+08:00"
+    },
+    {
+      "file": "0053-dpu-color-lut-sizes.patch",
+      "sha256": "aa2c69fe088a48b3b00712c940e067b7e55f6ef9f209753b9a264ac5f863f6ec",
+      "original_commit": "f11e45afb3e97744e8bb63558df2db0a5419a141",
+      "original_parent": "0482074eb3ce93bdd2a4dc070b483f45ad5479fb",
+      "tree": "f2841f2959e6d6c2c15fe7063c2fa085f9a47d79",
+      "committer_date": "2026-11-08T16:29:18+08:00"
+    },
+    {
+      "file": "0054-dsi-fixed-panel-scaling.patch",
+      "sha256": "d4401b9a7869a22b9c861d801d3946e1faf620e68eabfabf5d063b1abd8a17d2",
+      "original_commit": "51586cd1ddc492a3bd38b2beaaac26ff2c2f9aa2",
+      "original_parent": "f11e45afb3e97744e8bb63558df2db0a5419a141",
+      "tree": "223ae093c0d0351ab1075282ff4fe2c8bcb45d23",
+      "committer_date": "2026-11-08T16:36:59+08:00"
+    },
+    {
+      "file": "0055-dsi-default-panel-scaling.patch",
+      "sha256": "0105a783878e085fffca36ec4f7b4dc4fbe1ddeeef95fb90378a2b72ecdb8247",
+      "original_commit": "e1b0264d055d40378d54e7a4f3e00a6ea9449752",
+      "original_parent": "51586cd1ddc492a3bd38b2beaaac26ff2c2f9aa2",
+      "tree": "7be95fc8b47901e3c6ef8422f633e1d21f8c8d54",
+      "committer_date": "2026-11-08T16:45:11+08:00"
+    },
+    {
+      "file": "0056-rtc-efi-validate-time.patch",
+      "sha256": "7d1b494ce4d516a228c63505aed06d58b073a0ca73a75bd5e38cef9fe3cdf2c7",
+      "original_commit": "0155e5a062f60916d2dd1e3401ae33f3fbc4fa72",
+      "original_parent": "e1b0264d055d40378d54e7a4f3e00a6ea9449752",
+      "tree": "4344bbcedc7d9b16a0991d24cbc8e52495656638",
+      "committer_date": "2026-11-08T22:32:16+08:00"
+    },
+    {
+      "file": "0057-dpu-fixed-panel-hdr-conversion.patch",
+      "sha256": "e86c70753275b4f7bd172267c0024dfadbb773698fc25ac475c911023b79a45d",
+      "original_commit": "e8c00af6b31352f55752ae6030a7510928f32b12",
+      "original_parent": "0155e5a062f60916d2dd1e3401ae33f3fbc4fa72",
+      "tree": "067ee681f9bab4c20d0d50a5b928ef404758d67f",
+      "committer_date": "2026-11-08T23:39:32+08:00"
+    },
+    {
+      "file": "0058-panel-displayid-description.patch",
+      "sha256": "1e7870ec3108990a423c2115ee0b0943e33e5bb5b52ec2ff70e112e4b1d1fd12",
+      "original_commit": "fb656661c88c915e6a2e30412ab8597f3970ffe3",
+      "original_parent": "e8c00af6b31352f55752ae6030a7510928f32b12",
+      "tree": "4d64877d90bbade997b8a680340b4d996af327e1",
+      "committer_date": "2026-11-09T00:08:36+08:00"
+    },
+    {
+      "file": "0059-dpu-output-color-validation.patch",
+      "sha256": "e185522b2bb626003f7e2941b5c401a8be86b5b5276a856b5abe943a803da860",
+      "original_commit": "6e0a9b58a33ad9633cade6223e78bbb6553fe1ef",
+      "original_parent": "fb656661c88c915e6a2e30412ab8597f3970ffe3",
+      "tree": "c25063c1dd694b4688c87a7f4002ad2d4a81a31b",
+      "committer_date": "2026-11-09T00:41:04+08:00"
+    },
+    {
+      "file": "0060-apm-wait-for-transport.patch",
+      "sha256": "a8d41917da2fb1b8886806cdfde6246f603e4242d774f2136a16630710c50187",
+      "original_commit": "4f0955c42cddc8a03a24d1d34f9fee2c79c3e1ff",
+      "original_parent": "6e0a9b58a33ad9633cade6223e78bbb6553fe1ef",
+      "tree": "5fc1da00466c9868cb3a9b6741be3be55c3f9ac0",
+      "committer_date": "2026-11-09T02:15:41+08:00"
+    },
+    {
+      "file": "0061-apm-state-query-header.patch",
+      "sha256": "9000f231877319a2de94a5b7e196de29f586ab098685b4fd9b80fc26ba1def16",
+      "original_commit": "7c61bd92c40236a59cda9944595d5417dd9ebac6",
+      "original_parent": "4f0955c42cddc8a03a24d1d34f9fee2c79c3e1ff",
+      "tree": "01db20856d7249252569fdc3fd0724f173002867",
+      "committer_date": "2026-11-09T02:23:11+08:00"
+    },
+    {
+      "file": "0062-rtc-protected-counter-epoch.patch",
+      "sha256": "0d7d4bf6f322f4865ab4bd1572524dd241ccf197ff70cb74d599c08fb99ea306",
+      "original_commit": "066ff1a6d5761a93f04c5353a0b12f51ce577e17",
+      "original_parent": "7c61bd92c40236a59cda9944595d5417dd9ebac6",
+      "tree": "632ecff646b8348cad0b75c52d8c470f4848cea0",
+      "committer_date": "2026-11-09T03:55:38+08:00"
+    },
+    {
+      "file": "0063-apm-state-error-response.patch",
+      "sha256": "a83ce6af29ae9b4a7e6ec13170261f751914338ea8260c0f9df3abf3058e0dd5",
+      "original_commit": "851e6bbd6a30f2efd3cab0dc3864e27118dbcb59",
+      "original_parent": "066ff1a6d5761a93f04c5353a0b12f51ce577e17",
+      "tree": "d66d1c0aa66385eec570219211211ba2b94a43f4",
+      "committer_date": "2026-11-09T04:23:24+08:00"
+    },
+    {
+      "file": "0064-wifi-resume-mac-address.patch",
+      "sha256": "eaf096a1510c7c0c96c7a4e1bb4636e7c7cbef4e70d4bebbfbc9948275ed35e9",
+      "original_commit": "3dbac618631047e6db89b45f7bcf5c915f5c7e0f",
+      "original_parent": "851e6bbd6a30f2efd3cab0dc3864e27118dbcb59",
+      "tree": "a532092f31ef37a2569e6f15d74a8e82a7df5307",
+      "committer_date": "2026-11-09T06:01:40+08:00"
+    },
+    {
+      "file": "0065-dpu-debugfs-state-lock.patch",
+      "sha256": "de98df1944879f7c462be35a9f02297547330ae9085c43c174f7b9f7c37901d3",
+      "original_commit": "aa577d764700a6d84d39892d479bb6805a1162b3",
+      "original_parent": "3dbac618631047e6db89b45f7bcf5c915f5c7e0f",
+      "tree": "3ca5fc1c7c6a0ed6e926cfedb2ace9649591755c",
+      "committer_date": "2026-11-09T06:26:04+08:00"
+    },
+    {
+      "file": "0066-dpu-piano-bilinear-sampling.patch",
+      "sha256": "73cc589b8313865c87a1736f42e63c19e8b73328b8b6c87426a40a54a9af9000",
+      "original_commit": "a889a64ab161c688e65919c283fda5a62923f683",
+      "original_parent": "aa577d764700a6d84d39892d479bb6805a1162b3",
+      "tree": "0f647fe9528c439a8c14829d16c64a1792c27527",
+      "committer_date": "2026-11-09T16:46:50+08:00"
+    },
+    {
+      "file": "0067-hid-xiaomi-focus-pen.patch",
+      "sha256": "17c5aaa714f577e4e2e2b59f8caa728fd2f2426154b37fc30b6bb20731e8323f",
+      "original_commit": "1abdd75969c8214914d9bb73d3a3f088bdd18f6a",
+      "original_parent": "a889a64ab161c688e65919c283fda5a62923f683",
+      "tree": "82879a7a7bbdde75eb5c00e5537b0d258f1a3a2b",
+      "committer_date": "2026-11-09T16:52:10+08:00"
+    },
+    {
+      "file": "0068-power-mca-stop-work.patch",
+      "sha256": "f65f9ffd0e685b6193ad76f9e7e78dfb85f4e79518b6683724e688a6ad50cbab",
+      "original_commit": "9d68a9687864d082e867bce3dc171cd08e134d9f",
+      "original_parent": "1abdd75969c8214914d9bb73d3a3f088bdd18f6a",
+      "committer_date": "2026-11-08T02:10:20+08:00",
+      "tree": "3ecb727f2feae25d9ec241f2f603a064d0df357d"
+    },
+    {
+      "file": "0069-power-mipps-session-cleanup.patch",
+      "sha256": "1b720958f3cf037d568f74e92fe7367ecbc491172cedc08f18faac93bb944ff4",
+      "original_commit": "bb43bd1540b6cea45632d44a78665d901596337e",
+      "original_parent": "9d68a9687864d082e867bce3dc171cd08e134d9f",
+      "committer_date": "2026-11-08T02:49:10+08:00",
+      "tree": "0c7b1d20bc51a6576489a6c30ac30416f11fddc1"
+    },
+    {
+      "file": "0070-power-mca-connection-events.patch",
+      "sha256": "df04da4c64e6c4679de7661623ef7d5555eb1d7bd0d0b55aa8a2ec5390827234",
+      "original_commit": "e2c653992c43891e1934834785be818cfd92261c",
+      "original_parent": "bb43bd1540b6cea45632d44a78665d901596337e",
+      "committer_date": "2026-11-08T02:58:21+08:00",
+      "tree": "a78c0b126a8b8fe6148ff4ab4f2b7d59bd64b5df"
+    },
+    {
+      "file": "0071-power-sc8541-stop-watchdog.patch",
+      "sha256": "62a27872e1e499f485be87eee55b909517435ac93ba1cd3628fe52c1ca21c275",
+      "original_commit": "8cf58735f8a52c9ce794d2ddbead6974df41962b",
+      "original_parent": "e2c653992c43891e1934834785be818cfd92261c",
+      "committer_date": "2026-11-08T07:40:31+08:00",
+      "tree": "7b68f752cf7e7ec03827c27e10227ef45ce9976f"
+    },
+    {
+      "file": "0072-power-mca-direct-charge-session-pm.patch",
+      "sha256": "5b5222d7e6ece01f21ed7046c2e427e6a97416df00795d557f4c413e91bbd2fd",
+      "original_commit": "21fe65264b89453e95b8114b700e312b46e1a722",
+      "original_parent": "8cf58735f8a52c9ce794d2ddbead6974df41962b",
+      "committer_date": "2026-11-08T07:41:01+08:00",
+      "tree": "ed68741e4013280f91cf248d96353e92ec834b4e"
+    },
+    {
+      "file": "0073-power-mca-clear-proof-on-vbus-loss.patch",
+      "sha256": "3fe3d896ad282eacbef3da518e45a91694aee3ff730b7be946af6dd2ef7b3310",
+      "original_commit": "9243cfefba6ac7c70cfed9f9c07c93b08978651c",
+      "original_parent": "21fe65264b89453e95b8114b700e312b46e1a722",
+      "committer_date": "2026-11-08T09:13:00+08:00",
+      "tree": "9f06a6bf5a4ffd47e16c0739ec948bafb7f656c6"
+    },
+    {
+      "file": "0074-hid-nanosic-resume-fifo-keepalive.patch",
+      "sha256": "d219dd177af87619c62841ee30ee37a46dee54f9b5d20cc30cf78fcc12e5446c",
+      "original_commit": "77c8f1d4eff820251da932f32102c5add57d6cf2",
+      "original_parent": "9243cfefba6ac7c70cfed9f9c07c93b08978651c",
+      "committer_date": "2026-11-08T09:13:32+08:00",
+      "tree": "3c0805ab648b1f77fcb1f645f8fa16652dc3b865"
+    },
+    {
+      "file": "0075-power-mca-normal-charging-tables.patch",
+      "sha256": "5f0a5032ca52943363eb43c355d004e5ef52ac203f11c766204fa97c2222e46b",
+      "original_commit": "3fa8583af9b4165bd2de302e0a18b0c9bccf91c8",
+      "original_parent": "77c8f1d4eff820251da932f32102c5add57d6cf2",
+      "committer_date": "2026-11-08T17:07:12+08:00",
+      "tree": "5c2966b15ea9eee620f099eb9786c197865fdad5"
+    },
+    {
+      "file": "0076-power-mca-normal-termination-hysteresis.patch",
+      "sha256": "4e7ed9f946f7ca47c6c4e66cd31e0e8ff220d1c47939c02570142a5c94508df2",
+      "original_commit": "c0ff9c1d5fa95697f0106ba245ac70b24f4fabb6",
+      "original_parent": "3fa8583af9b4165bd2de302e0a18b0c9bccf91c8",
+      "committer_date": "2026-11-08T18:02:33+08:00",
+      "tree": "ac85e7c9325ffb763fde952de939b5d1d256fc89"
+    },
+    {
+      "file": "0077-power-mca-charge-enable-feedback.patch",
+      "sha256": "eb779b9b2060248867a9c785953f92d78a0dd39c0ca0489fbecc668a162ef14f",
+      "original_commit": "7d3173d0390424b12d7d4c9905ae194ddbf65f09",
+      "original_parent": "c0ff9c1d5fa95697f0106ba245ac70b24f4fabb6",
+      "committer_date": "2026-11-08T22:26:13+08:00",
+      "tree": "5331f7d64c46e2bbb95463ed0c544296713f2777"
+    },
+    {
+      "file": "0078-power-piano-parallel-battery-pack.patch",
+      "sha256": "7371479c880ac79c1583ebaffb3ed9d5fad694371222289a998218babb77ce91",
+      "original_commit": "a9eead3c1303f32558c098050e9f5c6bd6169163",
+      "original_parent": "7d3173d0390424b12d7d4c9905ae194ddbf65f09",
+      "committer_date": "2026-11-08T22:28:29+08:00",
+      "tree": "3d7c6ed7944ce1f298b498a60b8f86ca2c5f7c2a"
+    },
+    {
+      "file": "0079-power-mca-buck-session.patch",
+      "sha256": "913a130e6d8709d87cbbf628dbae2230f971609c9890cc4c461270b0dad6a7f8",
+      "original_commit": "7fb390577acb7f419b2cb892af55a56022fe7329",
+      "original_parent": "a9eead3c1303f32558c098050e9f5c6bd6169163",
+      "committer_date": "2026-11-09T19:33:44+08:00",
+      "tree": "f65ac9e316f58098b24f6022bb99be5d5c2a7b65"
+    },
+    {
+      "file": "0080-power-bq27xxx-auth-binding.patch",
+      "sha256": "887598b893b46d03c8baf93fd54642a2cd68382ebf877757eccda7ff75f44aee",
+      "original_commit": "f520d7a7a55283605daa4af38492ea3434efb5d8",
+      "original_parent": "7fb390577acb7f419b2cb892af55a56022fe7329",
+      "committer_date": "2026-11-09T22:26:59+08:00",
+      "tree": "659fc71656984a2655b4dae360ddd1383da311d7"
+    },
+    {
+      "file": "0081-power-bq27xxx-authentication.patch",
+      "sha256": "90698bfb39ed96f6867aa2e0205515c54c67209e2645b70ffaacf93739756b73",
+      "original_commit": "08fa09440c54399ce090519aa4d340d664265bc5",
+      "original_parent": "f520d7a7a55283605daa4af38492ea3434efb5d8",
+      "committer_date": "2026-11-09T22:28:31+08:00",
+      "tree": "9fee6cfdb3924011e49fc25f17283627f8f4d4ff"
+    },
+    {
+      "file": "0082-power-piano-charge-limit.patch",
+      "sha256": "085496e66edb7f2af77166350150b7e1e4ed113b31af84beca95d2e5fca20e6e",
+      "original_commit": "e07756dee79fecc6e85a54c8f0bdb957bfbccfb1",
+      "original_parent": "08fa09440c54399ce090519aa4d340d664265bc5",
+      "committer_date": "2026-11-10T00:59:32+08:00",
+      "tree": "8aec2afab2331f9e5e1ba45c5b4956b3b7148bea"
     }
-  ]
+  ],
+  "provenance": {
+    "normal_charging": {
+      "reference_url": "https://github.com/turbo-boo/android_kernel_xiaomi_sm8750",
+      "reference_commit": "2788c49d61796ba8e52a9ea1b5dc83c2456c57e7",
+      "reference_paths": [
+        "drivers/power/supply/mca/mca_strategy/strategy_quickchg/mca_strategy_quickchg.c",
+        "drivers/power/supply/mca/mca_strategy/strategy_buckchg/mca_strategy_buckchg.c",
+        "drivers/power/supply/mca/mca_strategy/strategy_fg/mca_strategy_fg.c",
+        "drivers/power/supply/mca/mca_qcom_subpmic_proxy"
+      ],
+      "stock_reference": "Piano final CN device tree: lwn batt_para_lwn and normal_volt_para*, non-FFC buckchg jeita_para, SC8541 BAT_OVP 4800 mV and alarm 4600 mV.",
+      "stock_program_sha256": {
+        "mca_qcom_subpmic_proxy.ko": "99d0723ba419aa73a218480492f03259fac3e0a1733578316665cd299ec228f4",
+        "mca_strategy_buckchg.ko": "76fde4454e0890c5fd6d28f364a7114c432712e3f8d977e30e7caee4ad6023c1",
+        "mca_buckchg_jeita.ko": "ae9f5b2bf143605bb38d5221894a8bd956b03d21b68136375b8d4f7ff5a3f992",
+        "mca_strategy_quickchg.ko": "fcad16b7b03ceeef5ce17c0472ad45cca5ea9f044b5addbc57c3ee452d00a195"
+      },
+      "stock_program_checks": "Named original proxy get/set functions confirm FV 0x2007 in mV, ITERM 0x2006 in mA, FCC 0x2005, all four-byte payloads. Original buck applies normal ITERM 452+20 mA; JEITA uses previous-zone hysteresis; charge status 0x2001 equals 5 when done.",
+      "scope": "Combined-cell current capped at 8000 mA; normal FV 4060/4480/4500 mV and ITERM 472 mA. Reference topology enums and property IDs are not copied; use Piano gauges and original-program wire IDs.",
+      "firmware_property_checks": "The pinned hyperos4-adsp program confirms FCC/ITERM getters are successful no-ops. Model 0x56 FV getter uses 10 mV while its setter uses 5 mV. Charge enable 0x2003 is a one-byte boolean whose getter reads PMIC CHGR 0x2646 bit 0.",
+      "local_protection": "Use temperature extremes from both cells and firmware pack, retain validated bounded PMIC heat sharing, delay warm-FV recovery and confirm PMIC charge-enable is off before suspend or teardown. Restore only after fresh temperature and normal-limit setup."
+    },
+    "battery_authentication": {
+      "reference_url": "https://github.com/ianchb/xiaomi-mipps-auth",
+      "reference_commit": "9176efbdf276b874fc0a97912a914449a88155fb",
+      "reference_path": "xiaomi-mipps-auth",
+      "factory_source_url": "https://github.com/MiCode/Xiaomi_Kernel_OpenSource",
+      "factory_source_commit": "0b426219a9a24b56c1593ebc84edb8a3f3b897b0",
+      "factory_source_path": "xiaomi-modules/mca/mca_hardware_ic/fuelgauge_ic/bq27z561/bq27z561.c",
+      "stock_rom": "OS4.0.5.0.XPYCNXM",
+      "stock_program_sha256": {
+        "batterysecret": "b4692888f6b5b86f29cbb0f2e2bb554b082079d368b77a70d7d9390bcd55ef05",
+        "bq27z561.ko": "7a76a4f20b83e4a3de197c7f8ca6bc2281072824e5d6b6ed9962d1c7af89dfdb"
+      },
+      "checks": "Piano project config selects factory HMAC-SHA256 key 1; fresh 32-byte challenges verified on both installed lwn cell-bank gauges. Vendor MAC commands 0x003e/0x003f switch FFC with a two-byte boolean payload, checksum and length. The mode getter in the stock program is cached, not a hardware readback.",
+      "scope": "Standard read-only authentic results and authenticated charge_type control; vendor key in the board DT. Does not enable FFC voltage/current in the charger policy."
+    }
+  }
 }
