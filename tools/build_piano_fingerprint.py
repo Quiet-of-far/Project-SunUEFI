@@ -222,7 +222,7 @@ EOF
             'arch=(aarch64)\nlicense=(LGPL-2.1-or-later)\n'
             f'pkgdesc="Standard {name} with Piano fingerprint support"\n'
             f'url={record["url"]}\ndepends=({quoted(dependencies)})\n'
-            'makedepends=(base-devel meson ninja gobject-introspection python-docutils perl)\n'
+            'makedepends=(base-devel meson ninja glib2-devel gobject-introspection python-docutils perl)\n'
             'options=(!lto !debug)\n'
             + ('noextract=(libpiano-goodix.a)\n' if name == 'libfprint' else '') +
             f'source=({quoted(files)})\nsha256sums=({quoted(digest(recipe / f) for f in files)})\n'
