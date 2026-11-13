@@ -15,7 +15,7 @@ PRODUCTS = ['arch-niri']
 
 class CiBuildTargetsTests(unittest.TestCase):
     def test_domains_and_shared_inputs(self):
-        self.assertEqual(targets.select(['uefi/core/PianoProductCore.c']), PRODUCTS)
+        self.assertEqual(targets.select(['uefi/core/product/PianoProductCore.c']), PRODUCTS)
         self.assertEqual(targets.select(['linux/dts/piano-audio-dmic-clock.dtso']), PRODUCTS)
         self.assertEqual(targets.select(['config/release.json']), PRODUCTS)
         self.assertEqual(targets.select(['sources.lock.json']), PRODUCTS)
@@ -27,11 +27,9 @@ class CiBuildTargetsTests(unittest.TestCase):
         self.assertEqual(targets.select(['uefi/handoff/bootselect/BootRequest.h']), PRODUCTS)
         self.assertEqual(targets.select(['tools/export_installer.py']), PRODUCTS)
         self.assertEqual(targets.select(['docs/user/install-from-artifact.md']), PRODUCTS)
-        self.assertEqual(targets.select(['uefi/core/PianoProductCore.c', 'linux/config']), PRODUCTS)
+        self.assertEqual(targets.select(['uefi/core/product/PianoProductCore.c', 'linux/config']), PRODUCTS)
         self.assertEqual(targets.select(['README.md', 'docs/status.md']), [])
-        self.assertEqual(targets.select(['linux/dts/drafts/piano-pen-dock.dtso']), [])
-        self.assertEqual(targets.select(['linux/dts/drafts/piano-pen-dock.dtso',
-                                         'config/release.json']), PRODUCTS)
+        self.assertEqual(targets.select(['linux/dts/piano-pen-dock.dtso']), PRODUCTS)
         self.assertEqual(targets.select([], 'arch-niri'), ['arch-niri'])
         self.assertEqual(targets.select(['linux/config'], 'uefi'), ['uefi'])
         self.assertEqual(targets.select(['config/release.json'], 'linux'), ['linux'])

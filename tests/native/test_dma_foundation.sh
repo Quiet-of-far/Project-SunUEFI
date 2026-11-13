@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Host-only tests of the actual shared DMA/SMMU and read-only UFS sources.
 set -euo pipefail
+. "$(dirname -- "${BASH_SOURCE[0]}")/core-includes.sh"
 case "$(uname -m)" in aarch64|arm64) sun_bind=AArch64 ;; *) sun_bind=X64 ;; esac
 sun_dma_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$sun_dma_root"

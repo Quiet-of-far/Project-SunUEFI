@@ -7,16 +7,31 @@
 | 触屏和 USB 网络的 unit | [`linux/bsp/common/usr/lib/systemd/system/`](../../../linux/bsp/common/usr/lib/systemd/system/) | 配置包安装到 `/usr/lib/systemd/system/` |
 | 共用硬件运行时安装 | [`tools/stage_piano_ram_hardware.py`](../../../tools/stage_piano_ram_hardware.py) | 读取 BSP 清单、保留权限和符号链接，清理旧的按序加载服务 |
 | DMA 状态诊断 | [`linux/userspace/piano-ram-hardware-prepare`](../../../linux/userspace/piano-ram-hardware-prepare) | 仅用于显式诊断，不阻止模块自动探测 |
-| 触屏帧解析与输入上报 | [`upstream/debian-piano-current/initramfs/touch-view/piano-touch-view.c`](../../../upstream/debian-piano-current/initramfs/touch-view/piano-touch-view.c) | 编译为 `/usr/bin/piano-touch-view`，由 `piano-touch.service` 启动 |
+| 手指帧解码与多点输入 | [`0095-input-nt36532e-matrix.patch`](../../../patches/linux/7.3/0095-input-nt36532e-matrix.patch) | 编入 `nt36532e_ts`，在现有 SPI 中断线程中直接上报标准输入事件 |
+| 笔输入、旧内核手指输入与原始帧诊断 | [`upstream/debian-piano-current/initramfs/touch-view/piano-touch-view.c`](../../../upstream/debian-piano-current/initramfs/touch-view/piano-touch-view.c) | 派生后编译为 `/usr/bin/piano-touch-view`，由 `piano-touch.service` 启动 |
 | 触屏程序的本地观测补丁 | [`tools/patches/piano-touch-view-observability.patch`](../../../tools/patches/piano-touch-view-observability.patch) | `build_piano_runtime_helpers.py` 派生源码，`build_release_helpers.py` 编译 |
 | 相机服务、图像处理与控制接口 | [`linux/bsp/optional/camera/`](../../../linux/bsp/optional/camera/) 与 [`linux/userspace/camera/`](../../../linux/userspace/camera/) | 共用 Makefile 编译服务与客户端，两条运行库构建入口使用同一份源码 |
 | 音频 UCM、模块加载参数、udev 配置 | [`linux/bsp/common/`](../../../linux/bsp/common/) | 按目录布局安装；文件清单在 `linux/bsp/manifest.json` |
 | Linux 调试入口与引导脚本 | [`linux/userspace/`](../../../linux/userspace/) | 包含 `piano-debug-bootstrap`、debug/serial unit、磁盘与 RAM 引导脚本 |
-| 内核配置与板级设备树 | [`linux/configs/`](../../../linux/configs/) 与 [`linux/dts/`](../../../linux/dts/) | 内核源码位于 `upstream/linux-piano/`，补丁来源见内核角色说明 |
+| 内核配置与板级设备树 | [`linux/configs/`](../../../linux/configs/) 与 [`linux/dts/`](../../../linux/dts/) | 内核源码由 `patches/linux/7.3/series.json` 从公开稳定版重建，补丁来源见内核角色说明 |
+
+手指输入由 `nt36532e` 直接处理，不需要用户空间读取者。矩阵核心与 SPI、固件和输入上报分开，使用整数完成帧校验、基线、行列去噪、局部峰值、接触面积和质心计算；输入层保留十个槽位和掌压锁存。掌压不按下 `BTN_TOUCH`，笔帧取消手指时先报告掌压类型再释放槽位。掌压判定的限制见[笔输入说明](../../../linux/userspace/pen/README.md#同一触控进程中的笔输入)。
+
+核心先用 16 个有效帧确定矩阵类型，再对 32 帧逐格取上中位数建立基线。去噪先减每列中位数，再减每行中位数；三路选择超出工作量预算后使用内核排序收尾。原始差值的最大值与最小值相差不到 50 时，去噪后的最大值必然低于 100，可以跳过去噪并执行相同的基线漂移；其余帧在去噪后按触摸阈值 200 决定是否扫描峰值和区域。60×40 的解码状态约 175 KiB，在探测时一次分配，正常帧与恢复路径不再分配内存。
+
+坏校验或截断帧只丢弃，不更新触点或基线；短暂丢样不会中断拖动。固件重载、挂起和移除释放触点，固件重载与挂起后重新学习基线。SPI 传输失败释放当前触点，保留基线；面板恢复时，固件重载失败则保持中断关闭。原始帧 FIFO 只在显式启用捕获时分配，手指输入本身不占用这份 4 MiB 队列。
+
+`piano-touch-view input` 在实时模式读取 `kernel_input` 状态：内核已接管手指时跳过手指解码和虚拟触屏，只保留显式请求的笔或诊断功能；两者都未请求时直接退出。旧内核继续使用原来的用户空间手指路径。[用户空间去噪补丁](../../../tools/patches/piano-touch-view-line-noise.patch)也使用中位数选择，作为旧内核和离线诊断的实现。
 
 硬件驱动通过 OF、platform、SPI、RPMsg 等标准 modalias 加载，依赖由设备树、内核 supplier 和延迟探测表达。显示、键盘、无线、音频和视频没有按加载顺序运行的用户空间服务。热更新定位后的修复必须写回内核、设备树或对应程序源码。
 
 键盘背光使用内核 LED 节点 `nanosic::kbd_backlight`，经 UPower 和桌面电源组件调节。蓝牙地址由 UEFI 通过标准设备树属性交给内核，触屏解码由设备绑定事件触发。ADSP 和 CDSP 由内核 `remoteproc` 驱动自动启动，设备树不再禁用 ADSP 自动启动，也不依赖用户空间等待显示接管。
+
+Debian 镜像安装带 LED 热插拔补丁的 UPower 1.90.9，daemon 与其精确依赖的
+`libupower-glib3` 一起打包。旧键盘 D-Bus 对象在未连接时仍保留，LED 插拔时
+重新扫描并关闭旧文件描述符。GNOME 的 GSD 48.1（Debian）和 51.0（Nyarch）
+通过同一标准接口异步刷新亮度与范围，取消过期请求，保留亮度为零的状态；
+不增加硬件服务。Nyarch、SteamOS 使用发行版自带的较新 UPower。
 
 相机服务在用户会话开始前创建 V4L2 loopback 节点，并发送 systemd 就绪通知；只有应用请求视频时才启动采集。相机驱动由硬件别名自动探测，`CAMERA_START=0` 禁用图像服务。升级时一起更新 unit 和 helper。
 
@@ -38,4 +53,24 @@ Arch+niri 由 `tools/build_arch_niri_rootfs.py` 和 `tools/stage_arch_piano.py`
 与原生程序。`tools/rootfs/` 保存公共构建和启动工具。
 电源键由 logind 处理，见[电源键和睡眠](../hardware/power-button.md)。
 
-旧 `bootprofiles/` 的源码已分别迁入 `uefi/` 和 `linux/`。该目录本地剩余的 `BootShim.bin`、`BootShim.elf` 与 `__pycache__` 是历史编译产物，当前工具使用 `uefi/handoff/bootshim/`，不从旧目录构建。
+桌面包由 rootfs 构建自动安装，源码与二进制摘要写入发行版 manifest，构建日志
+并入 CI 的 `logs.zip`。单独构建使用 `./build.sh gsd --sysroot <Debian root>`、
+`./build.sh upower --sysroot <Debian root>`、
+`./build.sh gdm --sysroot <Debian root>` 和
+`./build.sh pipewire --rootfs <发行版 root> --output <build 下的包目录>`；
+这些命令需要 root，输入均为本地构建目录，不访问平板。
+
+PipeWire 只重建完整 GStreamer 插件，链接目标 root 中同版本的库，并用包依赖
+锁定对应发行版版本；不替换服务端、音频组件或库 ABI。补丁处理格式枚举与首选
+格式、运行中 caps、缓冲池锁顺序和借用 MemPtr 的复制。来源和补丁摘要由
+`patches/pipewire/<版本>/series.json` 指定，源码完整准备后才进入缓存，构建器
+变化使旧包缓存失效。19 项格式测试串行运行，使用隔离的 GStreamer registry，
+不扫描系统插件；它们不替代平板上的相机、录屏和屏幕共享验证。
+
+GDM 在真实 KMS 设备提供显示接口后启动会话。设备树的临时帧缓冲按平台驱动识别，
+不只检查 `ID_PATH` 前缀；纯渲染 GPU 不作为显示就绪的依据。补丁位于
+`patches/gdm/<版本>/`，Debian 和 Nyarch 构建安装对应版本的标准软件包。
+修正复用 GDM 原有的 udev 事件与超时，不增加显示服务、固定延时
+或桌面重启脚本。硬件运行时安装同时清理显示管理器对旧 `piano-display.service`
+的专用依赖，保留其他用户配置。软件桌面截图只证明合成器渲染成功，内屏输出需
+结合 DRM 活动平面和摄像头实拍确认。

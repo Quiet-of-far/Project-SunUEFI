@@ -1,4 +1,4 @@
-"""Stop helpers left inside a finished build root before unmounting its /dev."""
+"""Keep build commands and their helpers inside temporary chroot environments."""
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -35,6 +35,14 @@ def bind_devices(root, run, tty=False):
         finally:
             for path in reversed(mounted):
                 run(['umount', '--recursive', path])
+
+
+def guest_command(root, args):
+    """Keep a build command's descendants in its own process namespace."""
+    root = Path(root)
+    return ['unshare', '--pid', '--fork', '--kill-child',
+            '--mount-proc=' + str(root / 'proc'), 'chroot', str(root),
+            *map(str, args)]
 
 
 def remove_pacman_sockets(root):

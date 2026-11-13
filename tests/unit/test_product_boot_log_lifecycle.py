@@ -26,6 +26,8 @@ class ProductBootLogLifecycleTests(unittest.TestCase):
                     ROOT / 'uefi/components/reset',
                     ROOT / 'uefi/components/pogo-product',
                     ROOT / 'uefi/components/touch-product',
+                    ROOT / 'uefi/components/board-identity',
+                    ROOT / 'uefi/components/rtc',
                     ROOT / 'uefi/handoff/early-memory']
         with tempfile.TemporaryDirectory(prefix='piano-core-bootlog-') as temporary:
             executable = Path(temporary) / 'lifecycle'
@@ -33,7 +35,8 @@ class ProductBootLogLifecycleTests(unittest.TestCase):
             mirror.mkdir()
             app = ROOT / 'uefi/core'
             for path in app.rglob('*.h'):
-                target = mirror / path.relative_to(app)
+                # Core sources are grouped by subsystem; the generated module is flat.
+                target = mirror / path.name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.symlink_to(path)
             (mirror / 'LateHandoff').symlink_to(ROOT / 'uefi/components/product-handoff', target_is_directory=True)
@@ -42,6 +45,7 @@ class ProductBootLogLifecycleTests(unittest.TestCase):
             (mirror / 'Components/os-boot').symlink_to(ROOT / 'uefi/components/os-boot', target_is_directory=True)
             (mirror / 'uefi-app').symlink_to(app, target_is_directory=True)
             # Host build takes the non-AArch64 branches, EL1 DAIF access traps at EL0
+            includes = sorted(path for path in app.iterdir() if path.is_dir()) + includes
             compiled = subprocess.run(['cc', '-U__aarch64__', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                             '-Wno-misleading-indentation', '-fshort-wchar',
                             '-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections',

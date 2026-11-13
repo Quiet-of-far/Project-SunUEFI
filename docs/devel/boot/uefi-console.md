@@ -75,10 +75,10 @@ wrapper 与 SE6 的时钟，GPIO56/57 复用到 SE6；GPIO188 复位和 GPIO3 �
 传输使用 SE6 的 GENI I²C FIFO 接口，1 MHz，由 CPU 轮询，不使用 DMA，
 所以不新增 SMMU 上下文。SE6 必须已经由引导程序载入 I²C 协议固件并开放
 FIFO 接口；如果它只开放 GSI 接口，固件只读取状态、不改动它，键盘在 UEFI
-中不可用，Linux 照常使用。MCU 的 RAM 固件来自固定版本的
-`upstream/piano-firmware-current` 中的 `nanosic/MCU_Upgrade.bin`，也就是
-Linux 根系统使用的同一文件；`tools/prepare_product.py` 按该仓库的
-`firmware/SHA256SUMS` 核对后生成头文件嵌入固件，生成文件不提交。
+中不可用，Linux 照常使用。MCU 的 RAM 固件来自仓库内的
+`vendor/firmware/piano-keyboard/MCU_Upgrade.bin`，也就是 Linux 根系统使用
+的同一文件；`tools/prepare_product.py` 按该组件的清单核对后生成头文件嵌入
+固件，生成文件不提交。
 
 任何一步失败，固件立即释放已经占用的资源，不发布输入设备，只保留音量键
 和电源键。RAM 日志中的 `PIANO_POGO_UNAVAILABLE` 写明失败步骤和原因，
@@ -121,10 +121,9 @@ Linux 根系统使用的同一文件；`tools/prepare_product.py` 按该仓库�
 触控固件按 GPIO100（触控 lcd-id）选择：0 用
 `novatek/novatek_nt36532_piano_fw_csot.bin`，1 用
 `novatek/novatek_nt36532_piano_fw_boe.bin`，与 Linux 设备树的
-`firmware-name` 顺序相同。两份文件来自固定版本的
-`upstream/piano-firmware-current`，`tools/prepare_product.py` 按
-`firmware/SHA256SUMS` 核对后嵌入，`PIANO_TOUCH_FIRMWARE` 日志记录所选
-文件的 SHA-256。
+`firmware-name` 顺序相同。两份文件来自仓库内的
+`vendor/firmware/piano-touch`，`tools/prepare_product.py` 按该组件的清单
+核对后嵌入，`PIANO_TOUCH_FIRMWARE` 日志记录所选文件的 SHA-256。
 
 SE2 只开放 GSI 接口，产品不改写该接口，使用 GPIO40/41/42/43 的模式 0
 软件 SPI，不使用 DMA。保留引脚配置，退出时恢复。运行时通过 GPIO162
@@ -160,19 +159,15 @@ USB bulk 传输或排队事件优先处理，期间暂停同步输入读取，�
 SimpleInit 默认旋转改为 0°，使用 GOP 的 3200×2136 横屏画布。界面旋转由
 SimpleInit/LVGL 处理，物理显示模式保持原样；实机已确认横屏显示。
 
-标准 UEFI 启动管理器读取 `Boot####` 和 `BootOrder`。ESP 中的 `boot.img`
-是 Android 格式的 Linux 启动包，不能直接当作 EFI 应用交给标准启动管理器。
-产品现在先查找 ESP 和启动文件，再登记一个指向固件内
-`PianoLinuxBoot.efi` 的 Linux 启动项。该应用向驻留核心请求启动，
-随后进入 ESP 中的 systemd-boot。默认 `linux.conf` 直接加载内核 EFI stub、
-initramfs 和 DTB；旧启动项仍可加载 ESP 中的 `LinuxBoot.efi`，通过 APP
-接口同步进入核心读取 `boot.img`，不递归启动管理器。具体内存与退出身份见
+标准 UEFI 启动管理器读取 `Boot####` 和 `BootOrder`。产品在发现 ESP 的
+`/EFI/Linux/sunuefi.efi` 后登记固件内的 Linux 启动项；菜单向驻留核心请求
+启动，核心直接将 UKI 作为 EFI 应用装载。没有 systemd-boot，也不再使用
+Android 格式的 Linux `boot.img` 或 ESP 中的兼容加载应用。具体内存与退出身份见
 [UEFI 核心](../uefi-core.md#esp-启动文件与系统交接)。
 
 入口在启动时发现并登记，普通非易失变量通过下文的文件后端保存。
-标准 EFI 启动项可以用 `linux`、`initrd`、`devicetree` 直接装载 Linux EFI stub。
-固件提供完整内存描述、设备树修正与安全退出；Android 格式的启动包仍须使用
-原有启动应用，不能仅改名为 `.efi`。两条路径共用同一份 UEFI 核心。
+UKI 内含内核、initramfs、DTB 和参数，systemd-stub 调用 Linux EFI stub；
+固件提供完整内存描述、设备树修正与安全退出。
 
 ## 内置菜单与自动保存
 
@@ -182,7 +177,8 @@ initramfs 和 DTB；旧启动项仍可加载 ESP 中的 `LinuxBoot.efi`，通过
 任何文件：目录由固件创建，修改后的设置由 SimpleInit 自动保存。
 静态配置里的默认值不会整份复制到用户文件。
 
-默认中文、横屏、DPI 600，开启动画，不自动倒计时。“启动 Linux”排在
+默认中文、横屏、DPI 600，开启动画；菜单显示后无操作五秒自动启动，
+按键、触摸或滚动取消自动启动。“启动 Linux”排在
 第一项并默认选中；Windows 沿用扫描 `EFI/Microsoft/Boot/bootmgfw.efi`
 的方式发现。菜单保留从文件启动、固件设置、UEFI Shell、文件管理器和
 通用工具。菜单内的 Linux、设置、Shell 与重启动作交给同一个驻留核心处理，

@@ -1,0 +1,1715 @@
+From 182f34e6f58a797c90a438e8af3a3bb4a7c1d5dc Mon Sep 17 00:00:00 2001
+From: Quiet-of-far <145577751+Quiet-of-far@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 16:51:51 +0800
+Subject: [PATCH] feat(power): integrate capacity cap with shared charging
+ inhibition
+
+Retain the standard end threshold and fixed five-point hysteresis.
+Read both gauges and feed the existing stop, FFC, JEITA and retry policy.
+Keep manual inhibition independent and avoid redundant change events.
+
+Signed-off-by: Quiet-of-far <145577751+Quiet-of-far@users.noreply.github.com>
+---
+ drivers/power/supply/piano_mca.c | 99 ++++++++++++++++++++++++++++----
+ 1 file changed, 87 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/power/supply/piano_mca.c b/drivers/power/supply/piano_mca.c
+index 901c477a2..8e0007ab2 100644
+--- a/drivers/power/supply/piano_mca.c
++++ b/drivers/power/supply/piano_mca.c
+@@ -448,270 +448,278 @@ module_param(cp_ibat_max, uint, 0444);
+ MODULE_PARM_DESC(cp_ibat_max,
+ 		 "Battery current while direct charging, both cells, mA (1000-12400; ordinary mode remains capped at 8000)");
+ 
+ static bool pan_ack;
+ module_param(pan_ack, bool, 0444);
+ MODULE_PARM_DESC(pan_ack,
+ 		 "Acknowledge the ADSP's USB-C port notifications (default: off)");
+ 
+ struct mca_usbc_req {
+ 	struct pmic_glink_hdr hdr;
+ 	__le32 cmd;
+ 	__le32 arg;
+ 	__le32 reserved;
+ };
+ 
+ struct mca_usbc_notify {
+ 	struct pmic_glink_hdr hdr;
+ 	u8 port_idx;
+ 	u8 orientation;
+ 	u8 mux_ctrl;
+ 	u8 res;
+ 	__le16 vid;
+ 	__le16 svid;
+ 	u8 extended_data[8];
+ 	__le32 reserved;
+ };
+ 
+ enum piano_mca_hv {
+ 	MCA_HV_OFF,		/* 5 V, may ask for 9 V */
+ 	MCA_HV_REQUESTED,	/* 9 V asked for, waiting for the bus */
+ 	MCA_HV_ON,		/* bus at 9 V */
+ 	MCA_HV_BLOCKED,		/* back at 5 V until detach */
+ };
+ 
+ enum piano_mca_cp {
+ 	MCA_CP_OFF,		/* buck charging, may start */
+ 	MCA_CP_OPENING,		/* source asked for, stage being started */
+ 	MCA_CP_ON,		/* stage running */
+ 	MCA_CP_STOPPING,		/* stop not confirmed; no source requests */
+ 	MCA_CP_DONE,		/* buck charging until detach */
+ };
+ 
+ struct mca_req {
+ 	__le32 owner;
+ 	__le32 type;
+ 	__le32 opcode;
+ 	__le32 property;
+ 	__le32 seq;
+ 	u8 data[MCA_DATA_LEN];
+ } __packed;
+ 
+ struct mca_resp {
+ 	__le32 owner;
+ 	__le32 type;
+ 	__le32 opcode;
+ 	__le32 property;
+ 	__le32 retcode;
+ 	__le32 seq;
+ 	u8 data[MCA_DATA_LEN];
+ } __packed;
+ 
+ struct piano_mca {
+ 	struct device *dev;
+ 	u32 pd_protocol_version;
+ 	__le32 otg_config[4];
+ 	bool otg_config_valid;
+ 	unsigned int otg_config_generation;
+ 	struct pmic_glink_client *client;
+ 	struct mutex lock;
+ 	struct mutex policy_lock;	/* charge limits and the complete poll decision */
++	unsigned int charge_end_threshold;
++	bool end_latched, end_paused;
+ 	u32 charge_limit_ua;
+ 	u32 *cooling_limits_ua;
+ 	unsigned int cooling_count;
+ 	unsigned long cooling_state;
+ 	struct iio_channel *skin_channels[6];
+ 	u32 skin_limit_ma;
+ 	int skin_temp_mc, skin_error;
+ 	unsigned long skin_sample_at;
+ 	u8 skin_flags;
+ 	bool skin_control;
+ 	bool policy_ready;
+ 	bool policy_stopped;
+ 	bool policy_suspended;
+ 	struct completion ack;
+ 	u32 seq;
+ 	bool service_up;
+ 	int retcode;
+ 	u8 data[MCA_DATA_LEN];
+ 	struct power_supply *usb;
+ 	struct delayed_work poll;
+ 	bool inhibit_charge;	/* Requested policy, retained after a stop error. */
+ 	bool inhibit_stopped_cp;	/* This policy requested the CP stop. */
+ 	struct notifier_block connection_notifier;
+ 	atomic_t connection_generation;
+ 	unsigned int polled_generation;
+ 	unsigned int polled_connection_generation;
+ 	bool online;
+ 	int vbus_uv;
+ 	int ibus_ua;
+ 	int icl_ma;
+ 	u32 real_type;
+ 	int icl_set_ma;		/* last limit written by charge_policy, 0 if none */
+ 	int fcc_set_ma;		/* last current written by charge_current, 0 if none */
+ 	u32 fcc_full;		/* charger-type current fcc_set_ma was derived from */
+ 	unsigned long fcc_raise_at;	/* jiffies before which it is not raised */
+ 	enum piano_mca_hv hv;
+ 	int hv_polls;
+ 	int hv_renegs;		/* times the source went back to 5 V on its own */
+ 	bool hv_pps;		/* 9 V is asked of a PPS APDO */
+ 	u32 hv_pps_ma;		/* its requested current limit */
+ 	enum piano_mca_cp cp;
+ 	struct power_supply *cp_psy;	/* the stage, held while not MCA_CP_OFF */
+ 	unsigned int cp_generation;
+ 	unsigned int cp_connection_generation;
+ 	u32 cp_mv;		/* voltage asked of the PPS source */
+ 	u32 cp_ma;		/* its current limit */
+ 	u32 cp_max_mv;		/* the most the source offers */
+ 	u32 cp_ibus_ma;		/* bus current target */
+ 	u32 cp_ibus_hot;	/* the target as lowered for the stage temperature */
+ 	u32 cp_ibat_trip;	/* battery current limit the trip checks against */
+ 	u32 cp_start_ibat_ma;	/* budget used for the initial bus protection */
+ 	/* jiffies when the limit was last that high, or the stage above target */
+ 	unsigned long cp_trip_at;
+ 	u32 cp_profile;		/* temperature pair + 1; zero until first sample */
+ 	u32 cp_stage;		/* even: CC, odd: CV; advances within a profile */
+ 	bool cp_cold, cp_hot;	/* temperature-stop recovery hysteresis */
+ 	bool normal_cold, normal_warm;	/* PMIC cold stop and warm-FV recovery */
+ 	bool normal_voltage_stop;	/* low-FV JEITA charging vote */
+ 	bool normal_full;	/* ordinary whole-pack termination vote */
+ 	u8 normal_term_count;
+ 	unsigned int normal_term_generation;
+ 	unsigned long normal_term_at;
+ 	int battery_direction;	/* sign of the last combined gauge current */
+ 	u8 normal_cool_zone, normal_hot_zone;	/* previous JEITA indices + 1 */
+ 	bool cp_retry;	/* only a policy pause may restart this connection */
+ 	bool ffc;		/* both gauges accepted fast-charge mode */
+ 	bool ffc_done;		/* do not re-enter FFC after tail charge on this cable */
+ 	bool ffc_mode_known;
+ 	bool cp_ffc;		/* mode used when the live pump was armed */
+ 	bool cp_buck_disabled;	/* factory FFC high-voltage cutoff, until pump stop */
+ 	bool pmic_pause_pending;
+ 	bool battery_authentic;
+ 	int battery_soc;
+ 	int battery_cycles;
+ 	u32 battery_fcc_derate_ma;
+ 	u32 battery_fv_derate_mv;
+ 	u32 battery_normal_fv_derate_mv;
+ 	u32 battery_health_fv_derate_mv;
+ 	u32 iterm_set_ma;
+ 	u32 buck_cv_steps;
+ 	unsigned long buck_cv_at;
+ 	unsigned long cp_taper_at;
+ 	u32 fv_set_mv;
+ 	unsigned int fv_generation;
+ 	unsigned int fv_connection;
+ 	bool cp_buck_par;	/* buck charger at MCA_CP_PAR_* */
+ 	int cp_polls;		/* while opening: tries; then: polls */
+ 	int cp_low;		/* consecutive polls below MCA_CP_LOW_IBUS_MA */
+ 	u32 cp_errors;		/* non-authentication VBUS losses in this connection */
+ 	unsigned long cp_off_at;	/* jiffies when the source went away */
+ 	unsigned long cp_on_at;		/* jiffies when it came */
+ 	bool auth_ok;		/* adapter response matched our fresh challenge */
+ 	unsigned int auth_generation;
+ 	bool mipps_attempted;	/* one exchange per physical attachment */
+ 	unsigned int mipps_generation;
+ 	unsigned int mipps_connection_generation;
+ 	bool mipps_cleanup_pending;	/* authentication flags not yet cleared */
+ 	struct mutex pen_boost_lock;
+ 	bool pen_boost_on;
+ 	unsigned int pen_boost_generation;
+ 	unsigned long auth_at;	/* jiffies when it did */
+ 	bool auth_tried;	/* direct charging asked for before any reset */
+ 	unsigned long hv_retry;	/* jiffies before which 9 V is not asked for */
+ 	struct pmic_glink_client *pan_client;
+ 	struct work_struct pan_work;
+ 	struct completion pan_done;
+ 	spinlock_t pan_lock;		/* pan_pending, pan_stopped */
+ 	unsigned long pan_pending;	/* ports to acknowledge, MCA_PAN_EN_PENDING */
+ 	bool pan_stopped;
+ 	struct dentry *dbg;
+ 	u32 dbg_prop;
+ 	u8 dbg_data[MCA_DATA_LEN];
+ 	int dbg_ret;
+ };
+ 
+ static int piano_mca_update_skin(struct piano_mca *mca);
+ static u32 piano_mca_skin_buck_current(struct piano_mca *mca);
+ 
+ /* Skin, the cooling device and power-supply limit share one total budget. */
+ static u32 piano_mca_charge_limit(struct piano_mca *mca)
+ {
+ 	u32 ua = READ_ONCE(mca->charge_limit_ua);
+ 
+ 	if (mca->cooling_count)
+ 		ua = min(ua, mca->cooling_limits_ua[READ_ONCE(mca->cooling_state)]);
+ 	if (mca->skin_control)
+ 		ua = min(ua, READ_ONCE(mca->skin_limit_ma) * 1000);
+ 	return ua / 1000;
+ }
+ 
++/* The capacity cap shares the normal policy's confirmed stop/restart path. */
++static bool piano_mca_charge_inhibited(struct piano_mca *mca)
++{
++	return READ_ONCE(mca->inhibit_charge) || mca->end_paused;
++}
++
+ static unsigned int piano_mca_connection_generation(struct piano_mca *mca)
+ {
+ 	return atomic_read(&mca->connection_generation);
+ }
+ 
+ static int piano_mca_connection_changed(struct notifier_block *nb,
+ 					unsigned long event, void *data)
+ {
+ 	struct piano_mca *mca = container_of(nb, struct piano_mca,
+ 						connection_notifier);
+ 	struct power_supply *psy = data;
+ 	struct device *parent = psy->dev.parent;
+ 
+ 	if (event != PSY_EVENT_CONNECTION_CHANGED ||
+ 	    !parent || parent->parent != mca->dev->parent ||
+ 	    psy->desc->type != POWER_SUPPLY_TYPE_USB ||
+ 	    !str_has_prefix(psy->desc->name, "ucsi-source-psy-"))
+ 		return NOTIFY_DONE;
+ 
+ 	/* Preserve physical changes even while the worker waits for an answer. */
+ 	atomic_inc(&mca->connection_generation);
+ 	mod_delayed_work(system_freezable_wq, &mca->poll, 0);
+ 	return NOTIFY_OK;
+ }
+ 
+ static void piano_mca_unregister_connection_notifier(void *data)
+ {
+ 	struct piano_mca *mca = data;
+ 
+ 	power_supply_unreg_notifier(&mca->connection_notifier);
+ }
+ 
+ static bool piano_mca_session_valid(struct piano_mca *mca,
+ 				    unsigned int generation,
+ 				    unsigned int connection)
+ {
+ 	return generation == pmic_glink_get_generation(mca->client) &&
+ 	       connection == piano_mca_connection_generation(mca);
+ }
+ 
+ static bool piano_mca_authenticated(struct piano_mca *mca)
+ {
+ 	return mca->auth_ok && !mca->mipps_cleanup_pending &&
+ 	       piano_mca_session_valid(mca, mca->auth_generation,
+ 				       mca->mipps_connection_generation);
+ }
+ 
+ static void piano_mca_callback(const void *data, size_t len, void *priv)
+ {
+ 	struct piano_mca *mca = priv;
+ 	const struct mca_resp *resp = data;
+ 
+ 	if (le32_to_cpu(resp->type) == PMIC_GLINK_NOTIFY) {
+ 		/* notification: id at +0xc, payload from +0x10 */
+ 		dev_dbg(mca->dev, "notify %#x len %zu\n",
+ 			le32_to_cpu(resp->property), len);
+ 		mod_delayed_work(system_freezable_wq, &mca->poll, 0);
+ 		return;
+ 	}
+ 
+ 	if (len != sizeof(*resp)) {
+ 		dev_warn(mca->dev, "unexpected response length %zu\n", len);
+ 		return;
+ 	}
+ 
+ 	if (le32_to_cpu(resp->seq) != mca->seq) {
+ 		dev_dbg(mca->dev, "stale response seq %u != %u\n",
+ 			le32_to_cpu(resp->seq), mca->seq);
+ 		return;
+ 	}
+@@ -2146,141 +2154,141 @@ static int piano_mca_battery_state(struct piano_mca *mca)
+ 	if (soc < 0 || soc > 10000)
+ 		return -ENODATA;
+ 	mca->battery_soc = soc / 100;
+ 	/* The final same-device smart_charge cc_ichg_cfg, not ut_test. */
+ 	mca->battery_fcc_derate_ma = mca->battery_cycles <= 800 ? 100 : 200;
+ 	/* Active Piano BAA_config_final CN-battery, not the DT's ut_test table. */
+ 	mca->battery_fv_derate_mv = mca->battery_cycles <= 100 ? 0 :
+ 		mca->battery_cycles <= 300 ? 20 : mca->battery_cycles < 1000 ? 40 : 50;
+ 	mca->battery_normal_fv_derate_mv = mca->battery_cycles <= 100 ? 0 :
+ 		mca->battery_cycles <= 300 ? 10 : mca->battery_cycles < 1000 ? 20 : 30;
+ 	mca->battery_health_fv_derate_mv = mca->battery_cycles >= 200 &&
+ 		mca->battery_cycles <= 800 && soh < 85 ? 40 : 0;
+ 	mca->battery_authentic = true;
+ 	return 0;
+ }
+ 
+ /* No raised PMIC voltage is retained across a partial gauge-mode update. */
+ static int piano_mca_set_gauge_modes(struct piano_mca *mca, bool fast)
+ {
+ 	union power_supply_propval value = {
+ 		.intval = fast ? POWER_SUPPLY_CHARGE_TYPE_FAST :
+ 				POWER_SUPPLY_CHARGE_TYPE_STANDARD,
+ 	};
+ 	struct power_supply *psy;
+ 	int i, ret = 0, error;
+ 
+ 	for (i = 0; i < ARRAY_SIZE(piano_mca_supplied_to); i++) {
+ 		psy = power_supply_get_by_name(piano_mca_supplied_to[i]);
+ 		if (!psy) {
+ 			ret = ret ?: -ENODEV;
+ 			continue;
+ 		}
+ 		error = power_supply_set_property(psy, POWER_SUPPLY_PROP_CHARGE_TYPE, &value);
+ 		power_supply_put(psy);
+ 		ret = ret ?: error;
+ 	}
+ 	return ret;
+ }
+ 
+ static int piano_mca_set_ffc(struct piano_mca *mca, bool fast)
+ {
+ 	int ret;
+ 
+ 	mca->ffc_mode_known = false;
+ 	ret = piano_mca_set_gauge_modes(mca, fast);
+ 	if (ret) {
+ 		/* Either gauge may have accepted a command whose reply was lost. */
+ 		if (fast && !piano_mca_set_gauge_modes(mca, false)) {
+ 			mca->ffc = false;
+ 			mca->ffc_mode_known = true;
+ 		}
+ 		return ret;
+ 	}
+ 	if (mca->ffc != fast) {
+ 		mca->cp_profile = 0;
+ 		mca->buck_cv_steps = 0;
+ 		dev_info(mca->dev, "%s battery charging mode\n", fast ? "FFC" : "standard");
+ 	}
+ 	mca->ffc = fast;
+ 	mca->ffc_mode_known = true;
+ 	return 0;
+ }
+ 
+ static int piano_mca_update_ffc(struct piano_mca *mca, int tcool, int twarm)
+ {
+ 	bool fast;
+ 	int ret;
+ 
+ 	ret = piano_mca_battery_state(mca);
+ 	fast = !ret && !mca->ffc_done && !mca->normal_full && mca->online &&
+-	       !READ_ONCE(mca->inhibit_charge) && piano_mca_charge_limit(mca) &&
++	       !piano_mca_charge_inhibited(mca) && piano_mca_charge_limit(mca) &&
+ 	       mca->skin_control && !mca->skin_error &&
+ 	       time_before_eq(jiffies, mca->skin_sample_at +
+ 			      msecs_to_jiffies(2 * MCA_SKIN_POLL_MS)) &&
+ 	       tcool >= MCA_FFC_TEMP_MIN && twarm < MCA_FFC_TEMP_MAX &&
+ 	       !mca->normal_warm && piano_mca_adapter_verified(mca) &&
+ 	       (mca->ffc || mca->battery_soc < MCA_FFC_SOC_MAX);
+ 	if (mca->ffc == fast && mca->ffc_mode_known)
+ 		return 0;
+ 	/* A live pump must be stopped before either gauge changes mode. */
+ 	if (piano_mca_cp_active(mca))
+ 		return -EAGAIN;
+ 	ret = piano_mca_normal_pause(mca, pmic_glink_get_generation(mca->client),
+ 				      piano_mca_connection_generation(mca));
+ 	if (ret)
+ 		return ret;
+ 	return piano_mca_set_ffc(mca, fast);
+ }
+ 
+ static int piano_mca_cp_temp_profile(int temp)
+ {
+ 	int i;
+ 
+ 	for (i = 0; i < ARRAY_SIZE(piano_mca_cp_profiles); i++)
+ 		if (temp >= piano_mca_cp_profiles[i].low &&
+ 		    temp < piano_mca_cp_profiles[i].high)
+ 			return i;
+ 	return -ERANGE;
+ }
+ 
+ /* Tighten immediately; require temperature headroom before restoring FV. */
+ static void piano_mca_normal_temperature(struct piano_mca *mca, int tcool,
+ 					 int twarm)
+ {
+ 	if (tcool < -9)
+ 		mca->normal_cold = true;
+ 	else if (tcool >= -8)
+ 		mca->normal_cold = false;
+ 	if (twarm >= 55)
+ 		mca->cp_hot = true;
+ 	else if (twarm < 53)
+ 		mca->cp_hot = false;
+ 	if (twarm >= 48)
+ 		mca->normal_warm = true;
+ 	else if (twarm < 46)
+ 		mca->normal_warm = false;
+ }
+ 
+ /*
+  * Evaluate the CN normal tables against both cells and the firmware pack.
+  * The colder/hotter cell may request different profiles: use the lower FV
+  * and both current limits. This extra per-cell check is local protection.
+  * CC/CV stages advance within a temperature pair, including across suspend.
+  */
+ static int piano_mca_cp_normal_limits(struct piano_mca *mca, int vbat, int ibat,
+ 				      int tcool, int twarm,
+ 				      struct piano_mca_cp_limits *limits)
+ {
+ 	const struct piano_mca_cp_profile *cold, *hot, *profile;
+ 	const struct piano_mca_cp_voltage *voltage;
+ 	struct piano_mca_cp_profile aged;
+ 	u32 key, ma, ceiling = MCA_CP_IBAT_MAX_MA;
+ 	int a, b, stage, last;
+ 
+ 	piano_mca_normal_temperature(mca, tcool, twarm);
+ 	if (tcool < 8)
+ 		mca->cp_cold = true;
+ 	if (twarm >= 55)
+ 		mca->cp_hot = true;
+ 	/* Factory restart hysteresis after leaving the charging window. */
+ 	if ((mca->cp_cold && tcool <= 8) || mca->cp_hot)
+@@ -2331,141 +2339,141 @@ static int piano_mca_cp_normal_limits(struct piano_mca *mca, int vbat, int ibat,
+ 				aged.voltage[1].max_ma = 5786;
+ 			}
+ 		}
+ 		aged.fv_mv -= mca->battery_health_fv_derate_mv;
+ 		aged.voltage[last].mv -= mca->battery_health_fv_derate_mv;
+ 		profile = &aged;
+ 	}
+ 	key = a * ARRAY_SIZE(piano_mca_cp_profiles) + b + 1 + (mca->ffc ? 32 : 0);
+ 	if (key != mca->cp_profile) {
+ 		mca->cp_profile = key;
+ 		mca->cp_stage = 0;
+ 		mca->cp_taper_at = 0;
+ 	}
+ 	ma = min3(clamp(cp_ibat_max, 1000U, ceiling),
+ 		  (u32)cold->voltage[0].max_ma, (u32)hot->voltage[0].max_ma);
+ 	stage = min_t(u32, mca->cp_stage / 2, profile->count - 1);
+ 	voltage = &profile->voltage[stage];
+ 	/* The factory FFC stage mask skips the CV phase at 4144 mV. */
+ 	if (mca->ffc && !stage && vbat >= voltage->mv) {
+ 		stage = 1;
+ 		mca->cp_stage = 2;
+ 		voltage = &profile->voltage[stage];
+ 	}
+ 	if (vbat >= voltage->mv) {
+ 		if (ibat <= min_t(int, voltage->min_ma, ma) &&
+ 		    stage + 1 < profile->count) {
+ 			stage++;
+ 			mca->cp_stage = 2 * stage;
+ 			voltage = &profile->voltage[stage];
+ 		} else {
+ 			mca->cp_stage = max_t(u32, mca->cp_stage, 2 * stage + 1);
+ 		}
+ 	}
+ 	ma = min(ma, (u32)voltage->max_ma);
+ 	if (mca->ffc)
+ 		ma -= min(ma, mca->battery_fcc_derate_ma);
+ 	else if (!mca->battery_authentic)
+ 		ma = min(ma, 2000U);
+ 	limits->ma = min(ma, piano_mca_charge_limit(mca));
+ 	limits->last = stage + 1 == profile->count;
+ 	limits->cv_mv = voltage->mv - (limits->last ? MCA_CP_TAPER_DELTA_MV : 0);
+ 	limits->fv_mv = profile->fv_mv;
+ 	limits->iterm_ma = mca->ffc ? profile->voltage[profile->count - 1].min_ma +
+ 					     (twarm >= 35 ? 68 : 75) : MCA_NORMAL_ITERM_MA;
+ 	if (vbat >= limits->cv_mv)
+ 		mca->cp_stage = max_t(u32, mca->cp_stage, 2 * stage + 1);
+ 	return 0;
+ }
+ 
+ /* Factory low-FV JEITA vote, independent of the temperature-stop vote. */
+ static bool piano_mca_normal_voltage_stop(struct piano_mca *mca, int vbat, int fv)
+ {
+ 	if (fv > MCA_NORMAL_LOW_FV_MAX_MV)
+ 		mca->normal_voltage_stop = false;
+ 	else if (vbat >= fv - MCA_NORMAL_HOT_TERM_HYS_MV)
+ 		mca->normal_voltage_stop = true;
+ 	else if (vbat < fv - MCA_NORMAL_HOT_RECHARGE_MV)
+ 		mca->normal_voltage_stop = false;
+ 
+ 	return mca->normal_voltage_stop;
+ }
+ 
+ /* The enable getter really reads PMIC CHGR 0x2646 bit 0, unlike FCC/ITERM. */
+ static int piano_mca_normal_enable(struct piano_mca *mca, bool enable,
+ 				   unsigned int generation,
+ 				   unsigned int connection)
+ {
+ 	u8 requested = enable, actual;
+ 	int ret;
+ 
+-	if (enable && (READ_ONCE(mca->inhibit_charge) || mca->normal_full))
++	if (enable && (piano_mca_charge_inhibited(mca) || mca->normal_full))
+ 		return -EPERM;
+ 
+ 	ret = piano_mca_xfer(mca, MCA_OP_READ, MCA_PROP_CHARGE_ENABLE,
+ 			     &actual, sizeof(actual), generation, connection);
+ 	/* An unreadable charger may still be stopped, but must not be enabled. */
+ 	if (ret && enable)
+ 		return ret;
+ 	/* The getter covers CHG_EN only; the setter also configures DCDC modes. */
+ 	ret = piano_mca_write_session(mca, MCA_PROP_CHARGE_ENABLE,
+ 				      &requested, sizeof(requested),
+ 				      generation, connection);
+ 	ret = ret ?: piano_mca_xfer(mca, MCA_OP_READ, MCA_PROP_CHARGE_ENABLE,
+ 				    &actual, sizeof(actual), generation, connection);
+ 	if (ret)
+ 		return ret;
+ 	return actual == requested ? 0 : -EIO;
+ }
+ 
+ /*
+  * Use the stock setters' ACKs. FCC and ITERM reads are firmware no-ops;
+  * the model-0x56 FV getter also uses twice the setter's register scale.
+  */
+ static int piano_mca_normal_set_fv(struct piano_mca *mca, u32 mv, u32 iterm_ma,
+ 				   unsigned int generation,
+ 				   unsigned int connection)
+ {
+ 	int ret;
+ 
+ 	if (!piano_mca_session_valid(mca, generation, connection))
+ 		return -ENODEV;
+ 	if (mca->fv_set_mv == mv && mca->iterm_set_ma == iterm_ma &&
+ 	    mca->fv_generation == generation &&
+ 	    mca->fv_connection == connection)
+ 		return 0;
+ 	/* A lost ACK can still have applied the write: discard the old cache. */
+ 	mca->fv_set_mv = 0;
+ 	ret = piano_mca_write_u32_session(mca, MCA_PROP_FV, mv, generation, connection);
+ 	if (ret)
+ 		return ret;
+ 	if (!piano_mca_session_valid(mca, generation, connection))
+ 		return -ENODEV;
+ 	/* The real Piano proxy uses a four-byte mA value, with no enable bit. */
+ 	ret = piano_mca_write_u32_session(mca, MCA_PROP_ITERM, iterm_ma,
+ 					  generation, connection);
+ 	if (ret)
+ 		return ret;
+ 	if (!piano_mca_session_valid(mca, generation, connection))
+ 		return -ENODEV;
+ 	if (mca->fv_generation != generation || mca->fv_connection != connection)
+ 		mca->fcc_set_ma = 0;
+ 	mca->fv_set_mv = mv;
+ 	mca->iterm_set_ma = iterm_ma;
+ 	mca->fv_generation = generation;
+ 	mca->fv_connection = connection;
+ 	return 0;
+ }
+ 
+ static u32 piano_mca_pmic_voltage(struct piano_mca *mca, u32 fv_mv, int twarm)
+ {
+ 	if (!mca->ffc)
+ 		return fv_mv;
+ 	if (mca->cp_ffc && !mca->cp_buck_disabled)
+ 		fv_mv = MCA_FFC_BUCK_FV_MV;
+ 	/* Same-device base-flip-same buck compensation. */
+ 	return fv_mv + (twarm >= 35 ? 45 : 40);
+ }
+ 
+ static u32 piano_mca_ffc_fv(struct piano_mca *mca)
+ {
+ 	return MCA_FFC_FV_MV - mca->battery_fv_derate_mv -
+@@ -2602,141 +2610,141 @@ static int piano_mca_normal_buck(struct piano_mca *mca, int *tbat,
+ 	ret = piano_mca_cp_gauges(mca, &vbat, &ibat, &tcool, &twarm);
+ 	if (ret) {
+ 		mca->normal_term_count = 0;
+ 		piano_mca_normal_pause(mca, generation, connection);
+ 		return ret;
+ 	}
+ 	*tbat = twarm;
+ 	piano_mca_normal_temperature(mca, tcool, twarm);
+ 	ret = piano_mca_update_ffc(mca, tcool, twarm);
+ 	if (ret) {
+ 		piano_mca_normal_pause(mca, generation, connection);
+ 		return ret;
+ 	}
+ 	if (mca->ffc) {
+ 		ret = piano_mca_xfer(mca, MCA_OP_READ, MCA_PROP_CHARGE_STATUS,
+ 				      &charge_status, sizeof(charge_status), generation, connection);
+ 		if (ret) {
+ 			piano_mca_normal_pause(mca, generation, connection);
+ 			return ret;
+ 		}
+ 		if (le32_to_cpu(charge_status) == 5 ||
+ 		    (mca->battery_soc >= MCA_FFC_SOC_MAX && twarm >= 35 &&
+ 		     vbat >= piano_mca_ffc_fv(mca) - 10 && ibat >= 0 && ibat <= 3164)) {
+ 			mca->ffc_done = true;
+ 			ret = piano_mca_update_ffc(mca, tcool, twarm);
+ 			if (ret)
+ 				return ret;
+ 		}
+ 	}
+ 	for (i = 0; i < ARRAY_SIZE(piano_mca_jeita); i++) {
+ 		if (tcool >= piano_mca_jeita[i].low && tcool < piano_mca_jeita[i].high)
+ 			cool = i;
+ 		if (twarm >= piano_mca_jeita[i].low && twarm < piano_mca_jeita[i].high)
+ 			warm = i;
+ 	}
+ 	if (cool < 0 || warm < 0)
+ 		return piano_mca_normal_pause(mca, generation, connection);
+ 	/* Factory JEITA keeps the previous row inside its extended boundaries. */
+ 	if (mca->normal_cool_zone) {
+ 		old = &piano_mca_jeita[mca->normal_cool_zone - 1];
+ 		if (tcool >= old->low - old->low_hys &&
+ 		    tcool < old->high + old->high_hys)
+ 			cool = mca->normal_cool_zone - 1;
+ 	}
+ 	if (mca->normal_hot_zone) {
+ 		old = &piano_mca_jeita[mca->normal_hot_zone - 1];
+ 		if (twarm >= old->low - old->low_hys &&
+ 		    twarm < old->high + old->high_hys)
+ 			warm = mca->normal_hot_zone - 1;
+ 	}
+ 	mca->normal_cool_zone = cool + 1;
+ 	mca->normal_hot_zone = warm + 1;
+ 	if (mca->normal_warm)
+ 		warm = ARRAY_SIZE(piano_mca_jeita) - 2;
+ 	fv = min(piano_mca_jeita[cool].fv, piano_mca_jeita[warm].fv);
+ 	ma = min3(ma, piano_mca_jeita[cool].ma, piano_mca_jeita[warm].ma);
+ 	if (!mca->battery_authentic)
+ 		ma = min(ma, 2000);
+ 	else if (fv >= 4480)
+ 		fv -= mca->battery_health_fv_derate_mv;
+ 	if (mca->ffc) {
+ 		fv = piano_mca_pmic_voltage(mca, piano_mca_ffc_fv(mca), twarm);
+ 		iterm = twarm >= 35 ? 3232 : 2425;
+ 	}
+ 	ma = min_t(u32, ma, piano_mca_charge_limit(mca));
+ 	ma = min_t(u32, ma, piano_mca_skin_buck_current(mca));
+ 	ret = piano_mca_normal_termination(mca, vbat, ibat, fv, generation, connection);
+ 	pause = piano_mca_normal_voltage_stop(mca, vbat, fv) ||
+ 		ret || mca->normal_full ||
+ 		mca->normal_cold || mca->cp_hot || ma < MCA_FCC_MIN_MA ||
+-		READ_ONCE(mca->inhibit_charge);
++		piano_mca_charge_inhibited(mca);
+ 	if (pause) {
+ 		/* Keep normal JEITA limits even while charging is inhibited. */
+ 		ret = piano_mca_normal_pause(mca, generation, connection);
+ 		if (ret)
+ 			return ret;
+ 	}
+ 	ma = min_t(u32, ma, piano_mca_policy_fcc(mca->real_type));
+ 	/* Factory base-flip-same software CV: reduce only at the cell target. */
+ 	if (mca->ffc) {
+ 		u32 cell_fv = piano_mca_ffc_fv(mca);
+ 
+ 		if (vbat >= cell_fv - 3 &&
+ 		    time_after_eq(jiffies, mca->buck_cv_at)) {
+ 			mca->buck_cv_steps = min(mca->buck_cv_steps + 1, 5U);
+ 			mca->buck_cv_at = jiffies + msecs_to_jiffies(1000);
+ 		}
+ 		fv -= mca->buck_cv_steps * 5;
+ 		if (vbat >= cell_fv) {
+ 			pause = true;
+ 			ret = piano_mca_normal_pause(mca, generation, connection);
+ 			if (ret)
+ 				return ret;
+ 		}
+ 	}
+ 	ret = piano_mca_normal_set_fv(mca, fv, iterm, generation, connection);
+ 	if (ret) {
+ 		piano_mca_normal_pause(mca, generation, connection);
+ 		return ret;
+ 	}
+ 	if (pause)
+ 		return 0;
+ 	if (mca->fcc_set_ma != ma)
+ 		ret = piano_mca_write_u32_session(mca, MCA_PROP_FCC, ma,
+ 						  generation, connection);
+ 	ret = ret ?: piano_mca_normal_enable(mca, true, generation, connection);
+ 	if (ret) {
+ 		piano_mca_normal_pause(mca, generation, connection);
+ 		return ret;
+ 	}
+ 	mca->fcc_set_ma = ma;
+ 	return 0;
+ }
+ 
+ static bool piano_mca_cp_active(struct piano_mca *mca)
+ {
+ 	return mca->cp == MCA_CP_OPENING || mca->cp == MCA_CP_ON ||
+ 	       mca->cp == MCA_CP_STOPPING;
+ }
+ 
+ static bool piano_mca_cp_session_valid(struct piano_mca *mca)
+ {
+ 	return piano_mca_session_valid(mca, mca->cp_generation,
+ 				       mca->cp_connection_generation);
+ }
+ 
+ static int piano_mca_cp_get(struct piano_mca *mca,
+ 			    enum power_supply_property psp, int *val)
+ {
+ 	union power_supply_propval pv;
+ 	int ret;
+ 
+ 	ret = power_supply_get_property(mca->cp_psy, psp, &pv);
+ 	if (!ret)
+ 		*val = pv.intval;
+ 
+ 	return ret;
+ }
+ 
+ static int piano_mca_cp_set_online(struct piano_mca *mca, bool on)
+ {
+@@ -2815,215 +2823,215 @@ static int piano_mca_cp_set_buck(struct piano_mca *mca, u32 icl_ma,
+ 					     mca->cp_connection_generation);
+ 	if (ret)
+ 		return ret;
+ 
+ 	mca->icl_set_ma = icl_ma;
+ 	mca->fcc_set_ma = fcc_ma;
+ 	return 0;
+ }
+ 
+ static int piano_mca_cp_stop(struct piano_mca *mca, const char *why)
+ {
+ 	int on, ret;
+ 
+ 	if (!piano_mca_cp_active(mca))
+ 		return mca->pmic_pause_pending ?
+ 			piano_mca_normal_pause(mca,
+ 				pmic_glink_get_generation(mca->client),
+ 				piano_mca_connection_generation(mca)) : 0;
+ 
+ 	if (mca->cp != MCA_CP_STOPPING)
+ 		mca->cp_retry = false;
+ 	mca->cp = MCA_CP_STOPPING;
+ 	ret = piano_mca_cp_set_online(mca, false);
+ 	ret = ret ?: piano_mca_cp_get(mca, POWER_SUPPLY_PROP_ONLINE, &on);
+ 	if (ret || on) {
+ 		dev_err_ratelimited(mca->dev,
+ 				    "failed to confirm switched-capacitor stop: %d\n",
+ 				    ret ?: -EBUSY);
+ 		return ret ?: -EBUSY;
+ 	}
+ 	power_supply_put(mca->cp_psy);
+ 	mca->cp_psy = NULL;
+ 	dev_info(mca->dev, "direct charging stopped: %s\n", why);
+ 
+ 	mca->cp = MCA_CP_DONE;
+ 	/* The factory sharing override must not survive without a live pump. */
+ 	if (mca->cp_ffc)
+ 		ret = piano_mca_normal_pause(mca,
+ 				pmic_glink_get_generation(mca->client),
+ 				piano_mca_connection_generation(mca));
+ 	mca->cp_ffc = false;
+ 	mca->cp_buck_disabled = false;
+ 	mca->hv = MCA_HV_OFF;
+ 	mca->hv_retry = jiffies;
+ 	return ret;
+ }
+ 
+ /* A policy pause may retry after its condition clears, including stop errors. */
+ static int piano_mca_cp_pause(struct piano_mca *mca, const char *why)
+ {
+ 	bool retry = mca->cp_retry || mca->cp == MCA_CP_OPENING ||
+ 		     mca->cp == MCA_CP_ON;
+ 	int ret = piano_mca_cp_stop(mca, why);
+ 
+ 	mca->cp_retry = retry;
+ 	return ret;
+ }
+ 
+ /* Retry a changed session, but retain same-session hardware/transport faults. */
+ static int piano_mca_cp_stop_io(struct piano_mca *mca, const char *why)
+ {
+ 	return piano_mca_cp_session_valid(mca) ? piano_mca_cp_stop(mca, why) :
+ 		piano_mca_cp_pause(mca, why);
+ }
+ 
+ /* Called under policy_lock; source negotiation remains independent. */
+ static int piano_mca_pause_charging(struct piano_mca *mca,
+ 				   unsigned int generation,
+ 				   unsigned int connection)
+ {
+-	bool inhibit = READ_ONCE(mca->inhibit_charge);
++	bool inhibit = piano_mca_charge_inhibited(mca);
+ 	int ret;
+ 
+ 	/* Remember the stop reason if confirmation must be retried. */
+ 	if (inhibit && (mca->cp == MCA_CP_OPENING || mca->cp == MCA_CP_ON))
+ 		mca->inhibit_stopped_cp = true;
+ 	ret = inhibit ? piano_mca_cp_stop(mca, "charging inhibited") :
+ 		piano_mca_cp_pause(mca, "charge current limit");
+ 	if (ret)
+ 		return ret;
+ 	if (!READ_ONCE(mca->service_up))
+ 		return -ENODEV;
+ 
+ 	return piano_mca_normal_pause(mca, generation, connection);
+ }
+ 
+ /* The PPS APDO direct charging can use, 0 if none */
+ static u32 piano_mca_cp_apdo(struct piano_mca *mca, u32 start_mv, u32 *max_mv)
+ {
+ 	struct piano_mca_pdo pdos[MCA_PD_MAX_PDOS];
+ 	u32 ma = 0;
+ 	int i;
+ 
+ 	if (piano_mca_read(mca, MCA_PROP_PDOS, pdos, sizeof(pdos)))
+ 		return 0;
+ 
+ 	for (i = 0; i < MCA_PD_MAX_PDOS; i++) {
+ 		u32 min_mv = le32_to_cpu(pdos[i].min_mv);
+ 		u32 hi_mv = le32_to_cpu(pdos[i].max_mv);
+ 
+ 		if (min_mv < hi_mv && min_mv <= start_mv &&
+ 		    hi_mv >= 2 * MCA_CP_VBAT_MAX_MV + MCA_CP_DELTA_MV &&
+ 		    le32_to_cpu(pdos[i].max_ma) > ma) {
+ 			ma = le32_to_cpu(pdos[i].max_ma);
+ 			*max_mv = hi_mv;
+ 		}
+ 	}
+ 
+ 	return ma;
+ }
+ 
+ /* The ADSP holds the adapter verified until the next authentication */
+ static bool piano_mca_adapter_verified(struct piano_mca *mca)
+ {
+ 	return mipps_auth && piano_mca_authenticated(mca) &&
+ 	       piano_mca_read_u32(mca, MCA_PROP_PD_VERIFIED) == 1;
+ }
+ 
+ /*
+  * Direct charging after the authentication, from 5 V by PPS and without
+  * asking for 9 V first.  A Xiaomi adapter does not reset: it stays at 5 V
+  * and the charger firmware offers its full APDO once it is verified, so
+  * that is tried at once; a source that refuses it is asked again after
+  * its reset, or once the wait for it is over.
+  */
+ static bool piano_mca_cp_after_auth(struct piano_mca *mca)
+ {
+ 	if (!mipps_auth || mca->hv == MCA_HV_REQUESTED ||
+ 	    mca->vbus_uv >= MCA_HV_VBUS_5V_MAX_UV)
+ 		return false;
+ 	if (piano_mca_authenticated(mca) && time_after(mca->cp_on_at, mca->auth_at))
+ 		return true;
+ 	if (piano_mca_auth_pending(mca) && mca->auth_tried)
+ 		return false;
+ 	return piano_mca_adapter_verified(mca);
+ }
+ 
+ /* Called from the poll at 9 V on the buck charger, or right after the auth */
+ static void piano_mca_cp_try_start(struct piano_mca *mca, unsigned int generation)
+ {
+ 	struct piano_mca_cp_limits limits;
+ 	int vbat, ibat, tcool, twarm, ret;
+ 	u32 start_mv, ma, src_ma, max_mv = 0;
+ 
+-	if (READ_ONCE(mca->inhibit_charge) || mca->cp_errors >= MCA_CP_MAX_ERRORS)
++	if (piano_mca_charge_inhibited(mca) || mca->cp_errors >= MCA_CP_MAX_ERRORS)
+ 		return;
+ 	if (mca->cp == MCA_CP_DONE && mca->cp_retry)
+ 		mca->cp = MCA_CP_OFF;
+ 	if (!cp_charge || !hv_charge || !charge_current ||
+ 	    mca->cp != MCA_CP_OFF ||
+ 	    (mca->hv != MCA_HV_ON && !piano_mca_cp_after_auth(mca)))
+ 		return;
+ 
+ 	mca->cp_generation = generation;
+ 	mca->cp_connection_generation = mca->polled_connection_generation;
+ 	if (!piano_mca_cp_session_valid(mca))
+ 		return;
+ 	if (piano_mca_cp_gauges(mca, &vbat, &ibat, &tcool, &twarm))
+ 		return;
+ 	piano_mca_normal_temperature(mca, tcool, twarm);
+ 	if (piano_mca_update_ffc(mca, tcool, twarm))
+ 		return;
+ 	if (piano_mca_cp_normal_limits(mca, vbat, ibat, tcool, twarm, &limits) ||
+ 	    limits.ma < MCA_CP_BUCK_MA + 4 * MCA_CP_OPEN_IBUS_MA ||
+ 	    piano_mca_normal_voltage_stop(mca, vbat, limits.fv_mv) ||
+ 	    vbat < MCA_CP_VBAT_MIN_MV || vbat >= limits.cv_mv ||
+ 	    piano_mca_verifying(mca, generation, mca->cp_connection_generation))
+ 		return;
+ 	/* Keep the PMIC stopped until all gauge and charger limits are set. */
+ 	if (piano_mca_normal_pause(mca, mca->cp_generation,
+ 				   mca->cp_connection_generation))
+ 		return;
+ 	if (piano_mca_normal_set_fv(mca, piano_mca_pmic_voltage(mca, limits.fv_mv, twarm),
+ 				    limits.iterm_ma,
+ 				    mca->cp_generation,
+ 				    mca->cp_connection_generation))
+ 		return;
+ 	if (piano_mca_normal_termination(mca, vbat, ibat, limits.fv_mv, generation,
+ 					  mca->cp_connection_generation) || mca->normal_full) {
+ 		piano_mca_normal_pause(mca, generation, mca->cp_connection_generation);
+ 		return;
+ 	}
+ 	/* PD requests in the middle of the authentication break it */
+ 	if (mipps_auth && !piano_mca_authenticated(mca) &&
+ 	    time_before(jiffies, mca->cp_on_at +
+ 				 msecs_to_jiffies(MCA_CP_AUTH_WAIT_MS)))
+ 		return;
+ 
+ 	start_mv = 2 * vbat + MCA_CP_DELTA_MV;
+ 	ma = piano_mca_cp_apdo(mca, start_mv, &max_mv);
+ 	if (ma < MCA_CP_BUCK_MA + 1000)
+ 		return;
+ 
+ 	mca->cp_ma = min_t(u32, ma, MCA_CP_PPS_MAX_MA);
+ 	mca->cp_max_mv = max_mv;
+ 	src_ma = mca->cp_ma;
+ 	src_ma -= min_t(u32, src_ma, MCA_CP_BUCK_MA + 200);
+ 	mca->cp_ibus_ma = min(clamp(cp_ibus_max, 500U, (u32)MCA_CP_IBUS_MAX_MA),
+ 			      src_ma);
+ 	mca->cp_ibus_ma = min(mca->cp_ibus_ma, (limits.ma - MCA_CP_BUCK_MA) / 2);
+ 	if (!piano_mca_adapter_verified(mca))
+ 		mca->cp_ibus_ma = min_t(u32, mca->cp_ibus_ma,
+ 					MCA_CP_THIRD_IBUS_MA);
+ 	if (mca->cp_ibus_ma < 2 * MCA_CP_OPEN_IBUS_MA) {
+ 		mca->cp = MCA_CP_DONE;
+ 		return;
+ 	}
+ 
+ 	mca->cp_psy = power_supply_get_by_name("sc8541");
+ 	if (!mca->cp_psy)
+ 		return;
+ 	mca->normal_term_count = 0;
+ 	/* This is a new attempt; an earlier policy pause cannot own its faults. */
+ 	mca->cp_retry = false;
+ 	mca->cp = MCA_CP_STOPPING;
+@@ -3336,311 +3344,353 @@ static void piano_mca_cp_step(struct piano_mca *mca)
+ 		 * next to the buck charger's share.  The gauges average over
+ 		 * 10-15 s, so the battery limit is held through the stage's
+ 		 * own reading and theirs only trims it slowly, once they
+ 		 * have caught up with a lowered limit.
+ 		 */
+ 		target = min(target, (ibat_max - (int)mca->fcc_set_ma) / 2);
+ 
+ 		over = ibus - target;
+ 		if (vbat >= limits.cv_mv)
+ 			mv -= MCA_CP_REG_STEP_MV;
+ 		else if (over > 0)
+ 			mv -= clamp(over / MCA_CP_REG_STEP_MA * MCA_CP_REG_STEP_MV,
+ 				    MCA_CP_REG_STEP_MV, MCA_CP_REG_MAX_STEP_MV);
+ 		else if (ibat > ibat_max && mca->cp_ibat_trip <= ibat_max)
+ 			mv -= MCA_CP_REG_STEP_MV;
+ 		else if (ibus + MCA_CP_BAND_MA < target &&
+ 			 ibat + MCA_CP_BAND_MA < ibat_max)
+ 			mv += MCA_CP_REG_STEP_MV;
+ 		/* the gauges catch up with a lowered limit only from here */
+ 		if (over > MCA_CP_BAND_MA)
+ 			mca->cp_trip_at = jiffies;
+ 
+ 		if (++mca->cp_polls % MCA_CP_LOG_POLLS == 0)
+ 			dev_info(mca->dev, "direct charging at %u mV: bus %d mV %d/%d mA, battery %d mV %d/%d mA %d degC, stage %d.%d degC\n",
+ 				 mca->cp_mv, vbus_uv / 1000, ibus, target,
+ 				 vbat, ibat, ibat_max, twarm,
+ 				 tdie / 10, tdie % 10);
+ 	}
+ 
+ 	mv = clamp_t(u32, mv, 2 * vbat, 2 * vbat + MCA_CP_REQ_MAX_DELTA_MV);
+ 	if (piano_mca_cp_request(mca, mv))
+ 		piano_mca_cp_stop_io(mca, "request refused");
+ }
+ 
+ static int piano_mca_sync_connection(struct piano_mca *mca)
+ {
+ 	unsigned int connection = piano_mca_connection_generation(mca);
+ 	int ret;
+ 
+ 	if (mca->polled_connection_generation == connection)
+ 		return 0;
+ 
+ 	/* VBUS may already be back: discard policy learned from the old source. */
+ 	mca->auth_ok = false;
+ 	if (mca->mipps_attempted)
+ 		mca->mipps_cleanup_pending = true;
+ 	mca->mipps_attempted = false;
+ 	mca->auth_tried = false;
+ 	ret = piano_mca_cp_stop(mca, "connection changed");
+ 	if (ret)
+ 		return ret;
+ 	mca->cp = MCA_CP_OFF;
+ 	mca->inhibit_stopped_cp = false;
+ 	mca->cp_profile = 0;
+ 	mca->cp_retry = false;
+ 	mca->cp_errors = 0;
+ 	mca->normal_full = false;
+ 	mca->normal_term_count = 0;
+ 	mca->ffc_done = false;
+ 	mca->ffc_mode_known = false;
+ 	mca->buck_cv_steps = 0;
+ 	mca->hv = MCA_HV_OFF;
+ 	mca->hv_renegs = 0;
+ 	mca->icl_set_ma = 0;
+ 	mca->fcc_set_ma = 0;
+ 	mca->online = false;
+ 	mca->polled_connection_generation = connection;
+ 	return 0;
+ }
+ 
++/* Read both cells; an unavailable gauge must not bypass an enabled cap. */
++static int piano_mca_charge_soc(struct piano_mca *mca)
++{
++	union power_supply_propval val;
++	struct power_supply *psy;
++	unsigned int i;
++	int ret, soc = 0;
++
++	for (i = 0; i < ARRAY_SIZE(piano_mca_supplied_to); i++) {
++		psy = power_supply_get_by_name(piano_mca_supplied_to[i]);
++		if (!psy)
++			return -ENODEV;
++		ret = power_supply_get_property(psy, POWER_SUPPLY_PROP_CAPACITY, &val);
++		power_supply_put(psy);
++		if (ret)
++			return ret;
++		if (val.intval < 0 || val.intval > 100)
++			return -ERANGE;
++		soc = max(soc, val.intval);
++	}
++	return soc;
++}
++
++/* policy_lock protects the threshold and its fixed five-point hysteresis. */
++static void piano_mca_update_end_threshold(struct piano_mca *mca)
++{
++	int soc;
++
++	if (mca->charge_end_threshold == 100) {
++		mca->end_latched = false;
++		mca->end_paused = false;
++		return;
++	}
++	soc = piano_mca_charge_soc(mca);
++	if (soc >= (int)mca->charge_end_threshold)
++		mca->end_latched = true;
++	else if (soc >= 0 && soc <= (int)mca->charge_end_threshold - 5)
++		mca->end_latched = false;
++	mca->end_paused = soc < 0 || mca->end_latched;
++}
++
+ static void piano_mca_poll(struct work_struct *work)
+ {
+ 	struct piano_mca *mca = container_of(work, struct piano_mca, poll.work);
+ 	bool online, changed;
+ 	u32 real_type = MCA_TYPE_UNKNOWN;
+ 	unsigned int generation = pmic_glink_get_generation(mca->client);
+ 	__le32 value;
+ 	int ret;
+ 
+ 	mutex_lock(&mca->policy_lock);
+ 	if (mca->policy_stopped || mca->policy_suspended)
+ 		goto unlock;
+ 	if (mca->polled_generation != generation) {
+ 		/* A prior worker may have completed after the PDR callback reset. */
+ 		mca->icl_set_ma = 0;
+ 		mca->fcc_set_ma = 0;
+ 		mca->hv = MCA_HV_OFF;
+ 		mca->hv_renegs = 0;
+ 		mca->auth_ok = false;
+ 		mca->mipps_attempted = false;
+ 		mca->polled_generation = generation;
+ 	}
++	piano_mca_update_end_threshold(mca);
+ 	if (piano_mca_sync_connection(mca))
+ 		goto requeue;
+ 	/* A rapid ADSP restart must not carry the old APDO into its new session. */
+ 	if (piano_mca_cp_active(mca) && !piano_mca_cp_session_valid(mca)) {
+ 		if (piano_mca_cp_pause(mca, "session changed"))
+ 			goto requeue;
+ 	} else if (mca->cp == MCA_CP_STOPPING) {
+ 		if (piano_mca_cp_stop(mca, "stop confirmation"))
+ 			goto requeue;
+ 	}
+ 	/* Auto may have been requested while its inhibited stop was pending. */
+-	if (!READ_ONCE(mca->inhibit_charge) && mca->inhibit_stopped_cp &&
++	if (!piano_mca_charge_inhibited(mca) && mca->inhibit_stopped_cp &&
+ 	    mca->cp == MCA_CP_DONE) {
+ 		mca->cp = MCA_CP_OFF;
+ 		mca->inhibit_stopped_cp = false;
+ 	}
+ 	/* An uncertain authentication cleanup must not postpone stopping charge. */
+ 	if (cp_charge && charge_current &&
+-	    (READ_ONCE(mca->inhibit_charge) || !piano_mca_charge_limit(mca)) &&
++	    (piano_mca_charge_inhibited(mca) || !piano_mca_charge_limit(mca)) &&
+ 	    piano_mca_pause_charging(mca, generation,
+ 				    mca->polled_connection_generation))
+ 		goto requeue;
+ 	if (mca->pmic_pause_pending && mca->service_up &&
+ 	    piano_mca_normal_pause(mca, generation, mca->polled_connection_generation))
+ 		goto requeue;
+ 	/* Finish an uncertain VERIFY_PROCESS write before any charging policy. */
+ 	if (piano_mca_mipps_cleanup(mca))
+ 		goto requeue;
+ 
+ 	piano_mca_sync_otg_config(mca);
+ 	ret = piano_mca_xfer(mca, MCA_OP_READ, MCA_PROP_BUS_VOLT,
+ 			     &value, sizeof(value), generation,
+ 			     mca->polled_connection_generation);
+ 	if (ret)
+ 		goto source_error;
+ 	mca->vbus_uv = le32_to_cpu(value);
+ 	online = mca->vbus_uv >= MCA_VBUS_ONLINE_UV;
+ 
+ 	/* The rest only means something with a source attached */
+ 	if (online) {
+ 		ret = piano_mca_xfer(mca, MCA_OP_READ, MCA_PROP_BUS_CURR,
+ 				     &value, sizeof(value), generation,
+ 				     mca->polled_connection_generation);
+ 		if (ret)
+ 			goto source_error;
+ 		mca->ibus_ua = le32_to_cpu(value);
+ 		ret = piano_mca_xfer(mca, MCA_OP_READ, MCA_PROP_ICL,
+ 				     &value, sizeof(value), generation,
+ 				     mca->polled_connection_generation);
+ 		if (ret)
+ 			goto source_error;
+ 		mca->icl_ma = le32_to_cpu(value);
+ 		if (piano_mca_read_type(mca, &real_type))
+ 			goto source_error;
+ 	} else {
+ 		mca->ibus_ua = 0;
+ 		mca->icl_ma = 0;
+ 	}
+ 
+ 	changed = online != mca->online || real_type != mca->real_type;
+ 	if (!online && mca->online)
+ 		mca->cp_off_at = jiffies;
+ 	if (online && !mca->online) {
+ 		/* away longer than a reset takes: another attach */
+ 		if (time_after(jiffies, mca->cp_off_at +
+ 				msecs_to_jiffies(MCA_AUTH_REATTACH_MS))) {
+ 			if (mca->mipps_attempted)
+ 				mca->mipps_cleanup_pending = true;
+ 			mca->auth_ok = false;
+ 			mca->mipps_attempted = false;
+ 		}
+ 		mca->cp_on_at = jiffies;
+ 		/* a voltage change under way breaks the identity exchange */
+ 		if (mipps_auth)
+ 			mca->hv_retry = jiffies + msecs_to_jiffies(MCA_HV_AUTH_WAIT_MS);
+ 	}
+ 	/* A restored PD classification must not stay blocked by an earlier
+ 	 * Unknown sample. Keep the same bounded retry budget until detach.
+ 	 */
+ 	if (online && piano_mca_is_pd(real_type) &&
+ 	    !piano_mca_is_pd(mca->real_type) && mca->hv == MCA_HV_BLOCKED &&
+ 	    mca->hv_renegs < MCA_HV_RENEG_MAX) {
+ 		mca->hv_renegs++;
+ 		mca->hv = MCA_HV_OFF;
+ 		if (time_before(mca->hv_retry,
+ 				jiffies + msecs_to_jiffies(MCA_HV_RENEG_MS)))
+ 			mca->hv_retry = jiffies + msecs_to_jiffies(MCA_HV_RENEG_MS);
+ 	}
+ 	mca->online = online;
+ 	mca->real_type = real_type;
+ 	if (piano_mca_update_skin(mca))
+ 		goto requeue;
+ 
+ 	/* Restore an in-use pen rail after ADSP restarts. Its consumer will
+ 	 * stop the transmitter on a communication error in the meantime.
+ 	 */
+ 	mutex_lock(&mca->pen_boost_lock);
+ 	if (mca->pen_boost_on &&
+ 	    mca->pen_boost_generation != pmic_glink_get_generation(mca->client))
+ 		piano_mca_pen_boost_on(mca);
+ 	mutex_unlock(&mca->pen_boost_lock);
+ 
+ 	if (mca->polled_connection_generation != piano_mca_connection_generation(mca))
+ 		goto requeue;
+ 	if (!online) {
+ 		bool auth_reset = piano_mca_auth_pending(mca);
+ 
+ 		mca->normal_term_count = 0;
+ 
+ 		/* UCSI ONLINE follows the connector, not VBUS. Preserve an
+ 		 * authentication reset only while its cable remains connected.
+ 		 * A physical replug needs a fresh challenge even within 10 s.
+ 		 */
+ 		if (!auth_reset ||
+ 		    power_supply_for_each_psy(mca, piano_mca_ucsi_status) < MCA_UCSI_CONNECTED) {
+ 			if (mca->mipps_attempted)
+ 				mca->mipps_cleanup_pending = true;
+ 			mca->auth_ok = false;
+ 			mca->mipps_attempted = false;
+ 		}
+ 		/* Other faults stay DONE; only VBUS losses need bounded reopens. */
+ 		if ((mca->cp == MCA_CP_OPENING || mca->cp == MCA_CP_ON) &&
+ 		    !auth_reset && mca->cp_errors < MCA_CP_MAX_ERRORS) {
+ 			mca->cp_errors++;
+ 			dev_warn(mca->dev, "source lost during direct charging (%u errors)\n",
+ 				 mca->cp_errors);
+ 		}
+ 		if (piano_mca_cp_pause(mca, "source offline"))
+ 			goto requeue;
+ 		if (cp_charge && charge_current &&
+ 		    (mca->ffc || !mca->ffc_mode_known)) {
+ 			if (mca->service_up &&
+ 			    piano_mca_normal_pause(mca, generation,
+ 						   mca->polled_connection_generation))
+ 				goto requeue;
+ 			if (piano_mca_set_ffc(mca, false))
+ 				goto requeue;
+ 		}
+ 		if (mca->icl_set_ma)
+ 			piano_mca_reset_icl(mca);
+ 		if (mca->fcc_set_ma)
+ 			piano_mca_reset_fcc(mca);
+ 		/* a hard reset in answer to the request looks like a detach */
+ 		if (mca->hv == MCA_HV_REQUESTED)
+ 			mca->hv_retry = jiffies + msecs_to_jiffies(MCA_HV_RETRY_MS);
+ 		mca->hv = MCA_HV_OFF;
+ 		mca->hv_renegs = 0;
+ 	} else if (charge_policy &&
+-		   (READ_ONCE(mca->inhibit_charge) || !piano_mca_charge_limit(mca))) {
++		   (piano_mca_charge_inhibited(mca) || !piano_mca_charge_limit(mca))) {
+ 		piano_mca_mipps_authenticate(mca);
+ 		if (!mca->mipps_cleanup_pending)
+ 			piano_mca_apply_policy(mca, generation,
+ 					       mca->polled_connection_generation);
+ 	} else if (charge_policy && piano_mca_cp_active(mca)) {
+ 		mca->normal_term_count = 0;
+ 		piano_mca_cp_step(mca);
+ 		if (!piano_mca_cp_active(mca) &&
+ 		    piano_mca_session_valid(mca, generation,
+ 					mca->polled_connection_generation))
+ 			piano_mca_apply_policy(mca, generation,
+ 					       mca->polled_connection_generation);
+ 	} else if (charge_policy) {
+ 		piano_mca_mipps_authenticate(mca);
+ 		if (!mca->mipps_cleanup_pending &&
+ 		    mca->polled_connection_generation == piano_mca_connection_generation(mca)) {
+ 			piano_mca_cp_try_start(mca, generation);
+ 			if (!piano_mca_cp_active(mca) &&
+ 			    piano_mca_session_valid(mca, generation,
+ 						    mca->polled_connection_generation))
+ 				piano_mca_apply_policy(mca, generation,
+ 						       mca->polled_connection_generation);
+ 		}
+ 	}
+ 	if (changed)
+ 		power_supply_changed(mca->usb);
+ 	goto requeue;
+ 
+ source_error:
+ 	mca->normal_term_count = 0;
+ 	/* A transport failure is not a measured disconnect or a new source. */
+ 	if (!piano_mca_cp_stop_io(mca, "source read failed"))
+ 		piano_mca_normal_pause(mca, generation,
+ 				       mca->polled_connection_generation);
+ 
+ requeue:
+ 	if (mca->service_up || mca->cp == MCA_CP_STOPPING) {
+ 		int interval = mca->skin_control ? MCA_SKIN_POLL_MS : MCA_POLL_MS;
+ 
+ 		if (piano_mca_cp_active(mca))
+ 			interval = min(interval, MCA_CP_POLL_MS);
+ 		if (mca->normal_term_count)
+ 			interval = min(interval, MCA_NORMAL_TERM_POLL_MS);
+ 		queue_delayed_work(system_freezable_wq, &mca->poll,
+ 				   msecs_to_jiffies(interval));
+ 	}
+ unlock:
+ 	mutex_unlock(&mca->policy_lock);
+ }
+ 
+ static enum power_supply_usb_type piano_mca_usb_type(u32 real_type)
+ {
+ 	switch (real_type) {
+ 	case MCA_TYPE_SDP:
+ 		return POWER_SUPPLY_USB_TYPE_SDP;
+ 	case MCA_TYPE_CDP:
+ 		return POWER_SUPPLY_USB_TYPE_CDP;
+ 	/* QC adapters are DCPs that can be asked for a higher voltage */
+ 	case MCA_TYPE_DCP:
+ 	case MCA_TYPE_DCP_B:
+ 	case MCA_TYPE_HVDCP:
+ 	case MCA_TYPE_HVDCP_3:
+ 	case MCA_TYPE_HVDCP_3_B:
+ 	case MCA_TYPE_HVDCP_3P5:
+ 		return POWER_SUPPLY_USB_TYPE_DCP;
+ 	case MCA_TYPE_ACA:
+ 		return POWER_SUPPLY_USB_TYPE_ACA;
+ 	case MCA_TYPE_C:
+ 		return POWER_SUPPLY_USB_TYPE_C;
+ 	case MCA_TYPE_PD:
+@@ -3824,242 +3874,266 @@ static int piano_mca_update_skin(struct piano_mca *mca)
+ 	}
+ 	if (piano_mca_charge_limit(mca) < old_ma)
+ 		return piano_mca_update_charge_limit(mca, old_ma);
+ 	return 0;
+ }
+ 
+ static int piano_mca_skin_get_temp(struct thermal_zone_device *zone, int *temp)
+ {
+ 	struct piano_mca *mca = thermal_zone_device_priv(zone);
+ 
+ 	guard(mutex)(&mca->policy_lock);
+ 	if (mca->skin_error)
+ 		return mca->skin_error;
+ 	/* Transport failures can prevent the policy worker from taking a sample. */
+ 	if (time_after(jiffies, mca->skin_sample_at +
+ 			      msecs_to_jiffies(2 * MCA_SKIN_POLL_MS)))
+ 		return -EAGAIN;
+ 	*temp = mca->skin_temp_mc;
+ 	return 0;
+ }
+ 
+ static const struct thermal_zone_device_ops piano_mca_skin_ops = {
+ 	.get_temp = piano_mca_skin_get_temp,
+ };
+ 
+ static int piano_mca_register_skin(struct piano_mca *mca)
+ {
+ 	struct thermal_zone_device *zone;
+ 	int ret;
+ 
+ 	if (!charge_policy || !charge_current || !cp_charge ||
+ 	    device_property_match_string(mca->dev, "io-channel-names", "battery0") < 0)
+ 		return 0;
+ 	mca->skin_control = true;
+ 	mca->skin_error = -EAGAIN;
+ 	/* Register before poll-stop; channels can be acquired later by the worker. */
+ 	ret = devm_add_action_or_reset(mca->dev, piano_mca_skin_release, mca);
+ 	if (ret)
+ 		return ret;
+ 	if (!device_property_present(mca->dev, "#thermal-sensor-cells"))
+ 		return 0;
+ 	zone = devm_thermal_of_zone_register(mca->dev, 0, mca, &piano_mca_skin_ops);
+ 	return PTR_ERR_OR_ZERO(zone);
+ }
+ 
+ static int piano_mca_usb_get_property(struct power_supply *psy,
+ 				      enum power_supply_property psp,
+ 				      union power_supply_propval *val)
+ {
+ 	struct piano_mca *mca = power_supply_get_drvdata(psy);
+ 
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_ONLINE:
+ 		val->intval = mca->online;
+ 		break;
+ 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+ 		val->intval = mca->online ? mca->vbus_uv : 0;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CURRENT_NOW:
+ 		val->intval = mca->ibus_ua;
+ 		break;
+ 	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
+ 		val->intval = mca->icl_ma * 1000;
+ 		break;
+ 	case POWER_SUPPLY_PROP_USB_TYPE:
+ 		val->intval = piano_mca_usb_type(mca->real_type);
+ 		break;
+ 	case POWER_SUPPLY_PROP_AUTHENTIC:
+ 		val->intval = mca->online && piano_mca_authenticated(mca);
+ 		break;
++	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
++		val->intval = READ_ONCE(mca->charge_end_threshold);
++		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT:
+ 		val->intval = READ_ONCE(mca->charge_limit_ua);
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX:
+ 		val->intval = MCA_FFC_IBAT_MAX_MA * 1000;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
+ 		val->intval = READ_ONCE(mca->inhibit_charge) ?
+ 			POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE :
+ 			POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO;
+ 		break;
+ 	default:
+ 		return -EINVAL;
+ 	}
+ 
+ 	return 0;
+ }
+ 
+ static int piano_mca_usb_set_property(struct power_supply *psy,
+ 				      enum power_supply_property psp,
+ 				      const union power_supply_propval *val)
+ {
+ 	struct piano_mca *mca = power_supply_get_drvdata(psy);
+ 	unsigned int generation, connection;
+ 	bool inhibit, changed = false;
+ 	u32 old_ma, ua = val->intval;
+ 	int ret = 0;
+ 
+ 	if (psp != POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR &&
+-	    psp != POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT)
++	    psp != POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT &&
++	    psp != POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD)
+ 		return -EINVAL;
+ 	if (!charge_policy || !cp_charge || !charge_current)
+ 		return -EOPNOTSUPP;
+-	if (psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT) {
++	if (psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD) {
++		if (val->intval < 50 || val->intval > 100)
++			return -EINVAL;
++	} else if (psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT) {
+ 		if (val->intval < 0 || ua > MCA_FFC_IBAT_MAX_MA * 1000 || ua % 1000 ||
+ 		    (ua && ua < MCA_FCC_MIN_MA * 1000))
+ 			return -EINVAL;
+ 	} else if (val->intval != POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO &&
+ 		   val->intval != POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE) {
+ 		return -EINVAL;
+ 	}
+ 
+ 	/* Wait for the complete poll decision; never drain work under its lock. */
+ 	mutex_lock(&mca->policy_lock);
+ 	if (mca->policy_stopped) {
+ 		ret = -ENODEV;
+ 		goto unlock;
+ 	}
++	if (psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD) {
++		if (mca->policy_suspended) {
++			ret = -EBUSY;
++			goto unlock;
++		}
++		changed = mca->charge_end_threshold != ua;
++		WRITE_ONCE(mca->charge_end_threshold, ua);
++		piano_mca_update_end_threshold(mca);
++		if (piano_mca_charge_inhibited(mca))
++			ret = piano_mca_pause_charging(mca,
++				pmic_glink_get_generation(mca->client),
++				piano_mca_connection_generation(mca));
++		mod_delayed_work(system_freezable_wq, &mca->poll, 0);
++		goto unlock;
++	}
+ 	if (psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT) {
+ 		old_ma = piano_mca_charge_limit(mca);
+ 		WRITE_ONCE(mca->charge_limit_ua, ua);
+ 		ret = piano_mca_update_charge_limit(mca, old_ma);
+ 		changed = true;
+ 		goto unlock;
+ 	}
+ 	if (mca->policy_suspended) {
+ 		ret = -EBUSY;
+ 		goto unlock;
+ 	}
+ 
+ 	inhibit = val->intval == POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE;
+ 	changed = READ_ONCE(mca->inhibit_charge) != inhibit;
+ 	/* Retain inhibition after a lost ACK; the worker must retry stopping. */
+ 	WRITE_ONCE(mca->inhibit_charge, inhibit);
+ 	generation = pmic_glink_get_generation(mca->client);
+ 	connection = piano_mca_connection_generation(mca);
+ 	if (inhibit) {
+ 		if (READ_ONCE(mca->service_up) || piano_mca_cp_active(mca))
+ 			ret = piano_mca_pause_charging(mca, generation, connection);
+-	} else {
++	} else if (!piano_mca_charge_inhibited(mca)) {
+ 		/* Only undo a confirmed CP stop requested by this policy. */
+ 		if (mca->inhibit_stopped_cp && mca->cp == MCA_CP_DONE) {
+ 			mca->cp = MCA_CP_OFF;
+ 			mca->inhibit_stopped_cp = false;
+ 		}
+ 	}
+ 	/* Auto re-enters the ordinary policy with fresh gauges and its hysteresis. */
+ 	mod_delayed_work(system_freezable_wq, &mca->poll, 0);
+ unlock:
+ 	mutex_unlock(&mca->policy_lock);
+ 	if (changed)
+ 		power_supply_changed(psy);
+ 	return ret;
+ }
+ 
+ static int piano_mca_usb_property_is_writeable(struct power_supply *psy,
+ 					      enum power_supply_property psp)
+ {
+ 	return (psp == POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR ||
+-		psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT) &&
++		psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT ||
++		psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD) &&
+ 	       charge_policy && cp_charge && charge_current;
+ }
+ 
+ static const enum power_supply_property piano_mca_usb_props[] = {
+ 	POWER_SUPPLY_PROP_ONLINE,
+ 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
+ 	POWER_SUPPLY_PROP_CURRENT_NOW,
+ 	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
+ 	POWER_SUPPLY_PROP_USB_TYPE,
+ 	POWER_SUPPLY_PROP_AUTHENTIC,
+ 	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT,
+ 	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX,
++	POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD,
+ 	POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
+ };
+ 
+ static const struct power_supply_desc piano_mca_usb_desc = {
+ 	.name = "piano-mca-usb",
+ 	.type = POWER_SUPPLY_TYPE_USB,
+ 	.charge_behaviours = BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO) |
+ 			     BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE),
+ 	.usb_types = BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN) |
+ 		     BIT(POWER_SUPPLY_USB_TYPE_SDP) |
+ 		     BIT(POWER_SUPPLY_USB_TYPE_DCP) |
+ 		     BIT(POWER_SUPPLY_USB_TYPE_CDP) |
+ 		     BIT(POWER_SUPPLY_USB_TYPE_ACA) |
+ 		     BIT(POWER_SUPPLY_USB_TYPE_C) |
+ 		     BIT(POWER_SUPPLY_USB_TYPE_PD) |
+ 		     BIT(POWER_SUPPLY_USB_TYPE_PD_PPS),
+ 	.properties = piano_mca_usb_props,
+ 	.num_properties = ARRAY_SIZE(piano_mca_usb_props),
+ 	.get_property = piano_mca_usb_get_property,
+ 	.set_property = piano_mca_usb_set_property,
+ 	.property_is_writeable = piano_mca_usb_property_is_writeable,
+ };
+ 
+ static int piano_mca_cooling_get_max(struct thermal_cooling_device *cdev,
+ 				     unsigned long *state)
+ {
+ 	struct piano_mca *mca = cdev->devdata;
+ 
+ 	*state = mca->cooling_count - 1;
+ 	return 0;
+ }
+ 
+ static int piano_mca_cooling_get_cur(struct thermal_cooling_device *cdev,
+ 				     unsigned long *state)
+ {
+ 	struct piano_mca *mca = cdev->devdata;
+ 
+ 	*state = READ_ONCE(mca->cooling_state);
+ 	return 0;
+ }
+ 
+ static int piano_mca_cooling_set_cur(struct thermal_cooling_device *cdev,
+ 				     unsigned long state)
+ {
+ 	struct piano_mca *mca = cdev->devdata;
+ 	u32 old_ma;
+ 
+ 	if (state >= mca->cooling_count)
+ 		return -EINVAL;
+ 	guard(mutex)(&mca->policy_lock);
+ 	if (mca->policy_stopped)
+ 		return -ENODEV;
+ 	old_ma = piano_mca_charge_limit(mca);
+ 	WRITE_ONCE(mca->cooling_state, state);
+ 	return piano_mca_update_charge_limit(mca, old_ma);
+ }
+ 
+ static const struct thermal_cooling_device_ops piano_mca_cooling_ops = {
+ 	.get_max_state = piano_mca_cooling_get_max,
+ 	.get_cur_state = piano_mca_cooling_get_cur,
+ 	.set_cur_state = piano_mca_cooling_set_cur,
+ };
+ 
+ static int piano_mca_register_cooling(struct piano_mca *mca)
+ {
+ 	static const char property[] = "xiaomi,charge-current-limits-microamp";
+ 	struct thermal_cooling_device *cdev;
+ 	int count, ret, i;
+ 
+ 	if (!charge_policy || !charge_current || !cp_charge ||
+@@ -4490,140 +4564,141 @@ static int piano_mca_suspend(struct device *dev)
+ 	if (mca->policy_stopped)
+ 		goto unlock;
+ 	ret = piano_mca_cp_pause(mca, "suspend");
+ 	/* The host's normal JEITA cannot run while its workqueue is frozen. */
+ 	if (!ret && cp_charge && charge_current && mca->service_up) {
+ 		unsigned int generation = pmic_glink_get_generation(mca->client);
+ 		unsigned int connection = piano_mca_connection_generation(mca);
+ 
+ 		ret = piano_mca_normal_pause(mca, generation, connection);
+ 		ret = ret ?: piano_mca_set_ffc(mca, false);
+ 	}
+ 	if (ret) {
+ 		mca->policy_suspended = false;
+ 		enable_delayed_work(&mca->poll);
+ 		mod_delayed_work(system_freezable_wq, &mca->poll, 0);
+ 		goto unlock;
+ 	}
+ 	mca->ffc_mode_known = false;
+ unlock:
+ 	mutex_unlock(&mca->policy_lock);
+ 	return ret;
+ }
+ 
+ static int piano_mca_resume(struct device *dev)
+ {
+ 	struct piano_mca *mca = dev_get_drvdata(dev);
+ 
+ 	mutex_lock(&mca->policy_lock);
+ 	if (mca->policy_suspended && !mca->policy_stopped) {
+ 		mca->policy_suspended = false;
+ 		enable_delayed_work(&mca->poll);
+ 		mod_delayed_work(system_freezable_wq, &mca->poll, 0);
+ 	}
+ 	mutex_unlock(&mca->policy_lock);
+ 	return 0;
+ }
+ 
+ static DEFINE_SIMPLE_DEV_PM_OPS(piano_mca_pm_ops, piano_mca_suspend,
+ 				piano_mca_resume);
+ 
+ static void piano_mca_shutdown(struct auxiliary_device *adev)
+ {
+ 	piano_mca_stop(auxiliary_get_drvdata(adev));
+ }
+ 
+ static int piano_mca_probe(struct auxiliary_device *adev,
+ 			   const struct auxiliary_device_id *id)
+ {
+ 	struct device *dev = &adev->dev;
+ 	struct power_supply_config psy_cfg = {};
+ 	struct piano_mca *mca;
+ 	int ret;
+ 
+ 	mca = devm_kzalloc(dev, sizeof(*mca), GFP_KERNEL);
+ 	if (!mca)
+ 		return -ENOMEM;
+ 
+ 	mca->dev = dev;
+ 	auxiliary_set_drvdata(adev, mca);
+ 	mca->pd_protocol_version = 1;
+ 	device_property_read_u32(dev, "xiaomi,mca-pd-protocol-version",
+ 				 &mca->pd_protocol_version);
+ 	if (mca->pd_protocol_version < 1 || mca->pd_protocol_version > 2)
+ 		return dev_err_probe(dev, -EINVAL, "unsupported MCA PD protocol\n");
+ 	dev_info(dev, "MCA PD protocol version %u\n", mca->pd_protocol_version);
+ 	mca->hv_retry = jiffies;
+ 	piano_mca_parse_otg_config(mca);
+ 	mutex_init(&mca->lock);
+ 	mutex_init(&mca->policy_lock);
+ 	mca->charge_limit_ua = MCA_FFC_IBAT_MAX_MA * 1000;
++	mca->charge_end_threshold = 100;
+ 	mutex_init(&mca->pen_boost_lock);
+ 	init_completion(&mca->ack);
+ 	INIT_DELAYED_WORK(&mca->poll, piano_mca_poll);
+ 	atomic_set(&mca->connection_generation, 0);
+ 
+ 	/* Allocated first so it outlives the poll work on unbind */
+ 	mca->client = devm_pmic_glink_client_alloc(dev, PMIC_GLINK_OWNER_BATTMGR,
+ 						   piano_mca_callback,
+ 						   piano_mca_pdr_notify, mca);
+ 	if (IS_ERR(mca->client))
+ 		return PTR_ERR(mca->client);
+ 
+ 	psy_cfg.drv_data = mca;
+ 	psy_cfg.supplied_to = piano_mca_supplied_to;
+ 	psy_cfg.num_supplicants = ARRAY_SIZE(piano_mca_supplied_to);
+ 	psy_cfg.attr_grp = piano_mca_usb_groups;
+ 	mca->usb = devm_power_supply_register(dev, &piano_mca_usb_desc, &psy_cfg);
+ 	if (IS_ERR(mca->usb))
+ 		return PTR_ERR(mca->usb);
+ 
+ 	ret = piano_mca_register_cooling(mca);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to register charger cooling\n");
+ 	ret = piano_mca_register_skin(mca);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to register skin temperature\n");
+ 	/* Stop before devres releases temperatures, cooling and power supply. */
+ 	ret = devm_add_action_or_reset(dev, piano_mca_stop, mca);
+ 	if (ret)
+ 		return ret;
+ 
+ 	ret = piano_mca_register_pen_supply(mca);
+ 	if (ret)
+ 		return ret;
+ 
+ 	mca->dbg = debugfs_create_dir("piano_mca", NULL);
+ 	debugfs_create_file("prop", 0200, mca->dbg, mca, &piano_mca_dbg_prop_fops);
+ 	debugfs_create_file("data", 0400, mca->dbg, mca, &piano_mca_dbg_data_fops);
+ 	debugfs_create_file("summary", 0400, mca->dbg, mca,
+ 			    &piano_mca_dbg_summary_fops);
+ 	devm_add_action_or_reset(dev, piano_mca_dbg_remove, mca->dbg);
+ 
+ 	/* Resources are ready; unregister before the earlier poll-stop action. */
+ 	mca->connection_notifier.notifier_call = piano_mca_connection_changed;
+ 	ret = power_supply_reg_notifier(&mca->connection_notifier);
+ 	if (ret)
+ 		return ret;
+ 	ret = devm_add_action_or_reset(dev, piano_mca_unregister_connection_notifier,
+ 				       mca);
+ 	if (ret)
+ 		return ret;
+ 
+ 	mutex_lock(&mca->policy_lock);
+ 	mca->policy_ready = true;
+ 	mutex_unlock(&mca->policy_lock);
+ 	pmic_glink_client_register(mca->client);
+ 
+ 	if (pan_ack)
+ 		return piano_mca_pan_init(mca);
+ 	return 0;
+ }
+ 
+ static const struct auxiliary_device_id piano_mca_id_table[] = {
+ 	{ .name = "pmic_glink.power-supply", },
+ 	{},
+ };
+ MODULE_DEVICE_TABLE(auxiliary, piano_mca_id_table);
+ 
+ static struct auxiliary_driver piano_mca_driver = {
+ 	.name = "piano_mca",

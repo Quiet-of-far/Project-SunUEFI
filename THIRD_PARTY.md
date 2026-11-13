@@ -1,6 +1,6 @@
 # 第三方来源与本地材料
 
-SunUEFI 站在这些项目之上：EDK2 / Mu-Silicium 提供 UEFI 基础和高通平台集成，simple-init 提供 UEFI 里的图形菜单，linux-piano 与 Linux 内核提供板级驱动，debian-piano、piano-firmware、piano-mesa、piano-sensors 提供根系统、设备固件、GPU 用户空间和传感器通信，MiCode 与本机原厂系统用作对照参考。各项目负责什么、我们增加了什么，见[上游项目](docs/devel/upstreams.md)。
+SunUEFI 站在这些项目之上：EDK2 / Mu-Silicium 提供 UEFI 基础和高通平台集成，simple-init 提供 UEFI 里的图形菜单，linux-piano 与 Linux 内核提供板级驱动，debian-piano、piano-mesa、piano-sensors 提供根系统、GPU 用户空间和传感器通信，设备固件取自官方 OTA，MiCode 与本机原厂系统用作对照参考。各项目负责什么、我们增加了什么，见[上游项目](docs/devel/upstreams.md)。
 
 本页是精确来源索引：固定的提交、使用它们的脚本和已知的许可线索。完整提交号以链接的锁文件和脚本为准。许可线索来自仓库中的文件声明，没有逐一重新核对上游许可正文。
 
@@ -8,12 +8,13 @@ SunUEFI 站在这些项目之上：EDK2 / Mu-Silicium 提供 UEFI 基础和高�
 
 | 组件 | 来源与固定身份 | 本仓库使用方式 / 工具 | 许可核对位置与当前范围 |
 | --- | --- | --- | --- |
-| Mu-Silicium | [Project-Silicium/Mu-Silicium](https://github.com/Project-Silicium/Mu-Silicium)，`3ec9169f308c01030a7e698072aca5acb2c0a144` | [prepare_piano.py](tools/prepare_piano.py) 派生 OnePlus 模板；[build_stage0.sh](tools/build_stage0.sh) 编译 | 上游许可与文件声明；[DeviceBuild.py](uefi/platforms/pianoPkg/DeviceBuild.py) 保留 Microsoft 版权/BSD-2-Clause-Patent。 |
+| Mu-Silicium | [Project-Silicium/Mu-Silicium](https://github.com/Project-Silicium/Mu-Silicium)，`3ec9169f308c01030a7e698072aca5acb2c0a144` | [prepare_piano.py](tools/dev/prepare_piano.py) 派生 OnePlus 模板；[build_stage0.sh](tools/build_stage0.sh) 编译 | 上游许可与文件声明；[DeviceBuild.py](uefi/platforms/pianoPkg/DeviceBuild.py) 保留 Microsoft 版权/BSD-2-Clause-Patent。 |
 | mu_wide_platforms（移植参考） | [sunflower2333/mu_wide_platforms](https://github.com/sunflower2333/mu_wide_platforms)，查阅提交 `3e1d052064beb6e59cda3cfba87d50e6cc088174` 的 [Piano 平台](https://github.com/sunflower2333/mu_wide_platforms/tree/3e1d052064beb6e59cda3cfba87d50e6cc088174/Platforms/PakalaPkg/Device/xiaomi-piano) | 同机 Project Mu UEFI、平台初始化与 ACPI 的参考资料；现有构建依赖见上方 Mu-Silicium 条目 | 仓库标注 BSD-2-Clause；具体源码及附带二进制按各自声明处理。 |
 | Mu_Basecore、Mu Plus、Mu OEM Sample、Silicium-ACPI、Device-Binaries | URL/commit 见 [sources.lock.json](sources.lock.json) | Mu 构建树及 [product hooks](tools/prepare_product_pump.py) | 各来源的许可/版权；Device-Binaries 还需按二进制材料核对。 |
 | dtc | [dgibson/dtc](https://github.com/dgibson/dtc)，`f3451d12532b9d382707c458a2ae2e5aa0e1eee4` | `upstream/dtc`、DTB 工具 | 上游固定提交的许可和文件声明。 |
 | simple-init | [BigfootACA/simple-init](https://github.com/BigfootACA/simple-init)，`3d66a6e78d519dd050fbebde4db6c5ac933f9aa4` | [prepare_simpleinit.py](tools/prepare_simpleinit.py)、[build_simpleinit.sh](tools/build_simpleinit.sh) | 上游声明；[本地 runtime](uefi/components/product-pump/simple-init/src/gui/piano_product_runtime.c) / 头文件为 LGPL-3.0-or-later。 |
 | lwext4 | [gkostka/lwext4](https://github.com/gkostka/lwext4)，固定来源和归档摘要见 [uefi-ext4.json](config/uefi-ext4.json) | [prepare_ext4.py](tools/firmware/prepare_ext4.py) 暂存标准 ext4 库，UEFI 文件协议适配在 `uefi/components/ext4/`；不编译格式化或分区工具 | 多数文件 BSD-3-Clause；`ext4_extent.c`、`ext4_xattr.c` 含 GPL-2.0，组合库按 GPL-2.0 处理，保留源码版权与许可。 |
+| f2fs-tools | 官方 1.17.0，来源与保留布局扩容补丁见 [series.json](patches/f2fs-tools/1.17.0/series.json) | Android 模块内静态 `fsck.f2fs`／`resize.f2fs`，由 [build_f2fs_tools.py](tools/android/build_f2fs_tools.py) 构建 | GPL-2.0；模块附带 COPYING、源码来源和本地补丁。 |
 | Linux / linux-piano | [blu-sharky/linux-piano](https://github.com/blu-sharky/linux-piano)、[torvalds/linux](https://github.com/torvalds/linux)；救援 pin 见 [kernel-profiles.json](linux/kernel-profiles.json) | [build_kernel.py](tools/build_kernel.py)；完整基线见 [full builder](tools/build_piano_full_kernel.py) / [next builder](tools/build_piano_next_full.py) | 选定内核的 `COPYING`、`LICENSES/` 和文件声明；不改变主机脚本的许可。 |
 | BigfootACA 高通显示补丁（Junhao Xie） | [PLL 初始化 `67b3cbd4bab5`](https://github.com/BigfootACA/linux/commit/67b3cbd4bab5687c3aa3c9fe5a14c37433e28bbf)、[DPU 停止顺序 `8f353c130fee`](https://github.com/BigfootACA/linux/commit/8f353c130fee0fcf09afbe10e7fc58f901931418)、[PHY 运行时接口时钟 `b95037aef0a0`](https://github.com/BigfootACA/linux/commit/b95037aef0a0bf5cd612e7517a67644887e9fd5d) | 默认内核补丁 `0024`、`0026`、`0034`；分别修正 PLL 初始化、视频流水线停止顺序和 PHY 接口时钟的运行时管理 | 保留原作者与 Signed-off-by；沿用相应 Linux 源文件的 SPDX 和内核许可。PHY 补丁仅调整本地已有恢复辅助代码附近的上下文。 |
 | MiCode 板级资料 / 公开内核 | [MiCode/Xiaomi_Kernel_OpenSource](https://github.com/MiCode/Xiaomi_Kernel_OpenSource)，`45fb9bd6ae5ba2942fc1d53e4b6b46ef76992f71`；DTS pin 见 [来源集](docs/archive/linux-bringup/piano-full-linux-candidate.md) | [PianoKeys.c](uefi/core/PianoKeys.c) 等注明参考来源 | 原声明保留；本地 Keys 为 GPL-2.0-only，TouchProbe 为 GPL-2.0-or-later。 |
@@ -110,6 +111,6 @@ SteamOS Manager 使用 [Valve 26.4.1 源码](https://gitlab.steamos.cloud/holo/s
 
 原生 PE/DEPEX、boot/DTB、厂商模块及固件保存在被忽略的本地目录，取得与输入限制见 [本地输入](docs/devel/local-inputs.md)。
 
-[inventory_native_drivers.py](tools/inventory_native_drivers.py) 清点提取模块；[prepare_product.py](tools/prepare_product.py) 校验并嵌入 FV；[piano_inherited_clock.py](tools/piano_inherited_clock.py) 产生固定 ROM ClockDxe 兼容派生。
+[inventory_native_drivers.py](tools/dev/inventory_native_drivers.py) 清点提取模块；[prepare_product.py](tools/prepare_product.py) 校验并嵌入 FV；[piano_inherited_clock.py](tools/piano_inherited_clock.py) 产生固定 ROM ClockDxe 兼容派生。
 
 这些材料的二进制再分发条件**未审查**；hash 只证明身份，不授予分发许可。未来 Release 按实际内容核对来源与通知，本页不作合法性或兼容性结论。

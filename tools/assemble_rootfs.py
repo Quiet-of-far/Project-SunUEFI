@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tarfile
 from urllib.parse import urlsplit
-from build_chroot import bind_devices, stop_helpers
+from build_chroot import bind_devices, guest_command, stop_helpers
 from build_piano_ram_bootstrap import guest_resolve
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -235,7 +235,9 @@ def execute(result):
             # This applies only to the build chroot, not its installed config.
             args = [args[0], '--config', '/run/pacman-build.conf',
                     *(['--disable-sandbox'] if cross else []), *args[1:]]
-        argv = ['chroot', str(root), '/usr/bin/env', 'PATH=/usr/sbin:/usr/bin:/sbin:/bin', 'SYSTEMD_OFFLINE=1', 'DEBIAN_FRONTEND=noninteractive', *args]
+        argv = guest_command(root, ['/usr/bin/env', 'PATH=/usr/sbin:/usr/bin:/sbin:/bin',
+                                    'SYSTEMD_OFFLINE=1', 'SYSTEMD_IN_CHROOT=1',
+                                    'DEBIAN_FRONTEND=noninteractive', *args])
         if text: return subprocess.check_output(argv, text=True)
         if not check: return subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return run(argv, input=input, text=input is not None)
@@ -320,7 +322,7 @@ def execute(result):
             guest(['gpgconf', '--homedir', '/etc/pacman.d/gnupg', '--kill', 'all'], check=False)
         stop_helpers(root)
         devices.close()
-        for path in reversed(mounted): run(['umount', path])
+        for path in reversed(mounted): run(['umount', '--recursive', path])
     for name in ('dev', 'proc', 'sys', 'run'):
         for path in (root / name).iterdir():
             if path.is_dir() and not path.is_symlink(): shutil.rmtree(path)

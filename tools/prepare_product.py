@@ -4,7 +4,7 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 import struct
 import uuid
@@ -18,6 +18,7 @@ from prepare_product_early_memory import prepare as prepare_early_memory, verify
 from prepare_product_handoff import prepare as prepare_handoff, stage_provider, verify_provider
 import piano_display_mapping as display_mapping
 import piano_vendor_inputs as vendor_inputs
+from core_source import core_source, has_core_source
 
 CORE_GUID='35E0D1B5-93CE-4D6A-9A93-6ADAA3F26C40'
 OS_BOOT_SOURCE_BUDGET=128*1024*1024
@@ -43,7 +44,7 @@ PRODUCT_COMPONENTS={
     'touch-product':('PianoGeniSpiPio.c','PianoGeniSpiPio.h','PianoTouchNvt.c','PianoTouchNvt.h',
                      'PianoTouchMatrix.c','PianoTouchMatrix.h','PianoTouchService.c','PianoTouchService.h'),
 }
-PIANO_FIRMWARE='upstream/piano-firmware-current/firmware'
+PIANO_FIRMWARE='vendor/firmware'
 POGO_FIRMWARE_NAME='nanosic/MCU_Upgrade.bin'
 # Indexed by the touch lcd-id level, like firmware-name in the Linux DT
 TOUCH_FIRMWARE_NAMES=(('Csot','novatek/novatek_nt36532_piano_fw_csot.bin'),('Boe','novatek/novatek_nt36532_piano_fw_boe.bin'))
@@ -62,7 +63,7 @@ PRODUCT_FLAGS=('PIANO_USB_SERVICE=1','PIANO_USB_EP0=1','PIANO_USB_FASTBOOT=1','P
 NATIVE_NAMES=vendor_inputs.NATIVE_NAMES
 EARLY_DXE_SOURCE='vendor/piano/early-dxe/EnvDxeEnhanced'
 EARLY_DXE_NAMES=('EnvDxeEnhanced.inf','EnvDxeEnhanced.efi','EnvDxeEnhanced.depex')
-EARLY_DXE_PROVENANCE_SHA256='486da704630a5f2357a075554010350b8015df84f1aeb2e36bbf9b4a7695d46d'
+EARLY_DXE_PROVENANCE_SHA256='7395e9f88c3810aff7014d661569a32faba248c373d68a12c210c02f3c50a694'
 DISK_MODULES=('MdeModulePkg/Universal/Disk/DiskIoDxe/DiskIoDxe.inf',
     'MdeModulePkg/Universal/Disk/PartitionDxe/PartitionDxe.inf',
     'MdeModulePkg/Universal/Disk/UnicodeCollation/EnglishDxe/EnglishDxe.inf','FatPkg/EnhancedFatDxe/Fat.inf')
@@ -101,7 +102,7 @@ def prepare_observation_families(root,app):
     families=observation_files(root)
     for rows in families.values():
         for name,path in rows.items():
-            if (root/'uefi/core'/name).exists():raise ValueError('Flat DXE observation name conflicts with core source: '+name)
+            if has_core_source(name, root):raise ValueError('Flat DXE observation name conflicts with core source: '+name)
             shutil.copyfile(path,app/name)
     return {'status':'READ_ONLY_DXE_OBSERVATION_BOUND_UNTESTED','phase':'DXE_AFTER_FOUNDATION_BEFORE_RAM_INVENTORY_UFS_USB',
             'platform_bound':True,'device_validated':False,'sec_early_ready':False,
@@ -142,6 +143,7 @@ def os_boot_files(root):
 
 
 def shared_boot_headers(root):
+    """Core headers keyed by subsystem path, matching the canonical includes."""
     folder=root/'uefi/core'
     return {path.relative_to(folder).as_posix():path for path in folder.rglob('*')
             if path.is_file() and path.suffix in ('.h','.inc') and path.name!='NativeProbeTable.h'}
@@ -176,7 +178,8 @@ def verify_os_boot(root,app,record):
             for path in (app/'Components/os-boot').rglob('*')if path.is_file() and '__pycache__' not in path.parts}
     if actual!=expected:raise ValueError('ProductCore OS boot compiled copies are stale or missing')
     for name,digest in headers.items():
-        for path in (app/'core'/name,app/name):
+        flat=app/Path(name).name
+        for path in (app/'core'/name,flat):
             if not path.is_file() or sha(path)!=digest:
                 raise ValueError('ProductCore shared OS boot include identity mismatch: '+name)
     sections={};section=None
@@ -218,15 +221,19 @@ def fix_product_low_heap(text,dtb):
 
 
 def pinned_firmware(root,name):
-    """One blob from the pinned piano-firmware checkout, checked against its SHA256SUMS"""
-    folder=Path(root)/PIANO_FIRMWARE
-    sums={}
-    for line in (folder/'SHA256SUMS').read_text().splitlines():
-        digest,_,listed=line.partition('  ')
-        if digest and listed:sums[listed.removeprefix('./')]=digest
-    data=(folder/name).read_bytes();digest=hashlib.sha256(data).hexdigest()
-    if sums.get(name)!=digest:raise ValueError(name+' differs from the pinned SHA256SUMS')
-    return data,digest
+    """One blob from the tracked firmware components, named by its rootfs path"""
+    base=Path(root)/PIANO_FIRMWARE
+    for manifest in sorted(base.glob('*/manifest.json')):
+        data=json.loads(manifest.read_text())
+        directory=PurePosixPath(data.get('directory','.'))
+        for filename,item in data['files'].items():
+            if (directory/PurePosixPath(filename)).as_posix()!=name:continue
+            content=(manifest.parent/filename).read_bytes()
+            digest=hashlib.sha256(content).hexdigest()
+            if len(content)!=item['bytes'] or digest!=item['sha256']:
+                raise ValueError(name+' differs from its firmware manifest')
+            return content,digest
+    raise ValueError('Firmware not found in tracked components: '+name)
 
 
 def c_array(name,raw):
@@ -436,7 +443,8 @@ def prepare(root=ROOT):
     contract=validate(json.loads((root/'config/piano-product.json').read_text()))
     inputs=vendor_inputs.load(root)
     vendor_record=vendor_inputs.record(root,inputs)
-    source=root/'uefi/core';missing=[name for name in SOURCE_NAMES if not(source/name).is_file()]
+    source=root/'uefi/core'
+    missing=[name for name in SOURCE_NAMES if not core_source(name, root).is_file()]
     if missing:raise ValueError('Actual product core sources missing: '+', '.join(missing))
     os_boot_files(root)
     observation_files(root)
@@ -461,7 +469,7 @@ def prepare(root=ROOT):
     shutil.rmtree(target/'Library/RamLogSerialPortLib')
     shutil.copytree(root/'uefi/components/product-support',target,dirs_exist_ok=True)
     app=target/'Applications/ProductCore';app.mkdir(parents=True)
-    for name in SOURCE_NAMES:shutil.copyfile(source/name,app/name)
+    for name in SOURCE_NAMES:shutil.copyfile(core_source(name, root),app/name)
     from compose_piano_dtb import read_fdt
     nodes=read_fdt((root/vendor_inputs.XBL_DTB).read_bytes())['tree']
     tables=[props['table'] for path,props in nodes.items()
@@ -478,8 +486,14 @@ def prepare(root=ROOT):
         '// Generated from the fixed Piano XBL DTB; no per-device identity.\n'
         'STATIC CONST struct {UINT32 Offset,Value;} mPianoUsbSsPhy[]={\n'+
         ''.join(f'  {{0x{offset:x},0x{value:x}}},\n' for offset,value in ss_pairs)+'};\n')
-    for path in source.iterdir():
-        if path.is_file() and path.suffix in ('.h','.inc'):shutil.copyfile(path,app/path.name)
+    shared=[path for path in source.rglob('*') if path.is_file() and path.suffix in ('.h','.inc')]
+    if len({path.name for path in shared})!=len(shared):
+        raise ValueError('Duplicate core header name across subsystems')
+    for path in shared:
+        shutil.copyfile(path,app/path.name)
+        nested=app/'core'/path.relative_to(source)
+        nested.parent.mkdir(parents=True,exist_ok=True)
+        shutil.copyfile(path,nested)
     shutil.copytree(source/'Protocol',app/'Protocol')
     for component,names in PRODUCT_COMPONENTS.items():
         for name in names:shutil.copyfile(root/'uefi/components'/component/name,app/name)

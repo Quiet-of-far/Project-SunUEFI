@@ -57,4 +57,4 @@ KDE 数位板页可能提示设备由用户空间驱动管理。笔的坐标解�
 
 * 新装系统需要自己通过 NetworkManager 保存 Wi-Fi。
 * Recovery 里的独立 SunUEFI 镜像已放弃，见[故障恢复](recovery.md#原厂-recovery)。
-* 测试设备是 CSOT 面板、16 GB 内存的平板，其他面板版本和内存容量没有测试过。
+* 上游桌面和硬件功能主要在 CSOT 面板的 `25091RP04C` 上验证；本分支使用 Arch+niri。

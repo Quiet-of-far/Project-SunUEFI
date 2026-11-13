@@ -12,6 +12,8 @@ UEFI Fastboot 是 SunUEFI 运行期间在后台提供的 USB Fastboot 服务，�
 
 下面所有命令都带 `-s SunUEFI-piano`，确保操作的是 UEFI 服务，而不是原厂 Bootloader。服务在 UEFI 菜单、固件设置和 Shell 里一直保持连接，切换页面不会退出。
 
+启动失败时，只要 USB 尚未关闭且资源没有进入退出流程，错误提示页会保留只读调试连接，可以读取状态、日志和截图。此时分区读取、下载、切换页面和重启命令均被禁用；恢复使用请长按电源重启。USB 已关闭或资源状态不确定时不会重新启用调试连接。
+
 USB 口插着 OTG 转接头和键盘、U 盘等设备时，这个口给这些设备使用，UEFI Fastboot 不在线。拔下设备、接回电脑后恢复。
 
 ## 查看状态
@@ -49,7 +51,7 @@ fastboot -s SunUEFI-piano fetch 分区名 文件
 
 | 命令 | 作用 |
 | --- | --- |
-| `oem boot-stable` | 从启动镜像（ESP）进入 systemd-boot，启动 Linux；旧安装沿用 `boot.img` 入口 |
+| `oem boot-stable` | 从启动镜像（ESP）直接启动 Linux UKI |
 | `oem setup`、`oem shell`、`oem simpleinit` | 切换到 UEFI 设置、Shell 或 SimpleInit 菜单 |
 | `reboot` | 释放 USB、存储、时钟和 SMMU 后重启，沿用已保存的启动路线 |
 | `continue` | 同样重启，不改变启动选择，也不会直接启动 Linux |

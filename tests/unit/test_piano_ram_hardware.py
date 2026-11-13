@@ -51,6 +51,39 @@ class RamHardwareTests(unittest.TestCase):
             query.return_value = 'different\n'
             with self.assertRaises(hardware.Refused): hardware.require_ram(proc, self.run)
 
+    def test_nixos_requires_piano_and_matching_booted_kernel_modules(self):
+        booted = self.path / 'booted-system'
+        modules = booted / 'kernel-modules/lib/modules' / os.uname().release
+        modules.mkdir(parents=True)
+        (self.run / 'booted-system').symlink_to(booted)
+        compatible = self.sysfs / 'firmware/devicetree/base/compatible'
+        compatible.parent.mkdir(parents=True)
+        compatible.write_bytes(b'xiaomi,piano\0qcom,sm8750\0')
+
+        # NixOS needs neither the Debian root policy nor its runtime markers.
+        proc = self.path / 'missing-proc'
+        hardware.require_ram(proc, self.run, self.sysfs)
+        compatible.write_bytes(b'qcom,sm8750\0')
+        with self.assertRaisesRegex(hardware.Refused, 'hardware is not'):
+            hardware.require_ram(proc, self.run, self.sysfs)
+        compatible.write_bytes(b'xiaomi,piano\0qcom,sm8750\0')
+        modules.rename(modules.with_name(modules.name + '-other'))
+        with self.assertRaisesRegex(hardware.Refused, 'kernel modules are missing'):
+            hardware.require_ram(proc, self.run, self.sysfs)
+
+    def test_without_nixos_symlink_ram_root_policy_still_applies(self):
+        (self.run / 'booted-system').mkdir()
+        proc = self.path / 'proc'
+        proc.mkdir()
+        (proc / 'cmdline').write_text('piano.root=ram')
+        (proc / 'mounts').write_text('rootfs / rootfs rw 0 0\n')
+        (self.run / 'piano-root-mode').write_text('ram')
+        with mock.patch.object(Path, 'is_dir', return_value=True):
+            hardware.require_ram(proc, self.run, self.sysfs)
+        (proc / 'cmdline').write_text('piano.root=ram root=/dev/sda4')
+        with self.assertRaisesRegex(hardware.Refused, 'block-root command line'):
+            hardware.require_ram(proc, self.run, self.sysfs)
+
     def setUp(self):
         (ROOT / 'build/distros').mkdir(parents=True, exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(dir=ROOT / 'build', prefix='ram-hardware-test-')
@@ -167,8 +200,20 @@ class RamHardwareTests(unittest.TestCase):
             full_stage.stage(dest, source)
             custom = dest / 'etc/piano/user.conf'
             custom.write_text('keep=yes\n')
+            for base in ('etc/systemd/system', 'usr/lib/systemd/system'):
+                for unit in ('display-manager', 'gdm', 'gdm3', 'sddm'):
+                    dropin = dest / base / (unit + '.service.d')
+                    dropin.mkdir(parents=True, exist_ok=True)
+                    (dropin / '20-piano-display.conf').write_text(
+                        '[Unit]\nRequires=piano-display.service\nAfter=piano-display.service\n')
+                    (dropin / '90-user.conf').write_text('[Service]\nNice=1\n')
             result = stage.build(self.path / 'staged-adapters', source, dest)
             self.assertEqual(custom.read_text(), 'keep=yes\n')
+            for base in ('etc/systemd/system', 'usr/lib/systemd/system'):
+                for unit in ('display-manager', 'gdm', 'gdm3', 'sddm'):
+                    dropin = dest / base / (unit + '.service.d')
+                    self.assertFalse((dropin / '20-piano-display.conf').exists())
+                    self.assertTrue((dropin / '90-user.conf').is_file())
             for name in result['removed_paths']:
                 self.assertFalse((dest / name).exists())
                 self.assertFalse((dest / name).is_symlink())
@@ -287,17 +332,21 @@ class RamHardwareTests(unittest.TestCase):
 
     def test_actual_clock_overlay_only_exact_seven_properties_and_rejects_drift(self):
         base = ROOT / 'private/analysis/piano-linux-owned-dma/Piano-full-linux-owned-dma.dtb'
-        if not base.exists():
-            self.skipTest('actual complete merged DTB required')
+        kernel = ROOT / 'build/kernel-worktrees/piano-smmu-routes'
+        rom = ROOT / 'private/analysis/android-memory-2026-10-05/live.dtb'
+        dtc = ROOT / 'build/kernel-topics/piano-panel/scripts/dtc/dtc'
+        fdtoverlay = dtc.with_name('fdtoverlay')
+        libfdt = ROOT / 'upstream/dtc/libfdt/libfdt.so.1.8.1'
+        required = [base, rom, dtc, fdtoverlay, libfdt,
+                    *(kernel / name for name in clocks.INPUTS)]
+        if any(not path.is_file() for path in required):
+            self.skipTest('complete clock-overlay hardware inputs required')
         # Tool's output policy requires the explicit private directory.
         with tempfile.TemporaryDirectory(dir=ROOT / 'private/analysis', prefix='clock-test-') as tmp:
             out = Path(tmp) / 'candidate'
             args = SimpleNamespace(base=base, base_sha256=clocks.sha(base.read_bytes()),
-                kernel_tree=ROOT / 'build/kernel-worktrees/piano-smmu-routes',
-                rom=ROOT / 'private/analysis/android-memory-2026-10-05/live.dtb', output_dir=out,
-                dtc=ROOT / 'build/kernel-topics/piano-panel/scripts/dtc/dtc',
-                fdtoverlay=ROOT / 'build/kernel-topics/piano-panel/scripts/dtc/fdtoverlay',
-                libfdt=ROOT / 'upstream/dtc/libfdt/libfdt.so.1.8.1')
+                kernel_tree=kernel, rom=rom, output_dir=out,
+                dtc=dtc, fdtoverlay=fdtoverlay, libfdt=libfdt)
             report = clocks.fold(args)
             self.assertEqual(len(report['changes']), 7)
             self.assertFalse(report['hardware_verified'])

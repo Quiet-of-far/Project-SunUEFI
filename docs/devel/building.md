@@ -139,7 +139,12 @@ python3 tools/package_sparse_images.py --bundle artifacts/release --output artif
 ```
 
 `package` 默认读取 `build/distros/arch-niri-piano` 下的 rootfs、清单和 initramfs。
-`./build.sh all` 按顺序构建固定源码、UEFI、模块、内核、Arch+niri 和安装镜像。
+`./build.sh all` 顺序构建固定源码、UEFI、模块、内核、Arch+niri 和安装镜像。
+
+已有根系统时，`./build.sh esp` 只生成启动镜像。启动镜像包含
+`/EFI/Linux/sunuefi.efi`，将内核、initramfs、DTB 和参数封装为 UKI，
+由 SunUEFI 直接启动。打包使用 systemd 的 `ukify`，默认从 Arch 的
+`systemd` 包取 ARM64 stub；也可用 `--stub` 和 `--ukify` 指定输入。
 
 设备固件由 `tools/stage_piano_firmware.py` 安装。`config/release.json` 的
 `firmware.overlays` 选择 HyperOS DSP 等固件，来源、大小和 SHA256 记录在清单中。

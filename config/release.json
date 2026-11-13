@@ -8,7 +8,7 @@
     "stable_commit": "d50d994bffa3c7c6db2d8bc4c5f0c55e3f46b0cd",
     "stable_version": "7.3.3",
     "uapi_sha256": "5638464826c36018483e2c06f260c1bc439fc6f66b584f56c1e76ec8846c37e5",
-    "target_tree": "8aec2afab2331f9e5e1ba45c5b4956b3b7148bea",
+    "target_tree": "f08cfbbefa3a83d10814338ac585a8bedfd3260e",
     "cpu_model_overlay": "linux/dts/piano-cpu-model.dtso",
     "additional_dtb_overlays": [
       "linux/dts/piano-cma.dtso",
@@ -35,6 +35,7 @@
       "linux/dts/piano-display-interconnects.dtso"
     ],
     "root_policy": "LABEL=PIANOROOT",
+    "command_line": "console=tty0 loglevel=4 consoleblank=0 fbcon=font:TER16x32 rdinit=/pianoinit piano.root=LABEL=PIANOROOT rootfstype=ext4 rootwait ro pd_ignore_unused clk_ignore_unused panic=0 iommu.passthrough=1",
     "preferred_display_mode": {
       "board_compatible": "xiaomi,piano",
       "refresh_hz": 120,
@@ -42,7 +43,7 @@
       "panel_vendor": "auto"
     },
     "base_commit": "d50d994bffa3c7c6db2d8bc4c5f0c55e3f46b0cd",
-    "localversion": "-piano-sunuefi-cachy"
+    "localversion": "-piano-sunuefi-cachy-optimize"
   },
   "debian": {
     "source": "upstream/debian-piano-current",
@@ -50,15 +51,20 @@
     "purpose": "Shared Piano hardware services and boot tooling only; no Debian system image is built."
   },
   "firmware": {
-    "source": "upstream/piano-firmware-current",
-    "commit": "05fc37c09ca8146eecfc4920f8485479db140ae5",
     "manifest": "firmware/SHA256SUMS",
     "overlays": [
       "vendor/firmware/hyperos4-adsp/manifest.json",
       "vendor/firmware/hyperos4-cdsp/manifest.json",
       "vendor/firmware/hyperos4-fingerprint/manifest.json",
-      "vendor/firmware/piano-display/manifest.json"
-    ]
+      "vendor/firmware/piano-ath12k/manifest.json",
+      "vendor/firmware/piano-bluetooth/manifest.json",
+      "vendor/firmware/piano-display/manifest.json",
+      "vendor/firmware/piano-keyboard/manifest.json",
+      "vendor/firmware/piano-qcom-vpu/manifest.json",
+      "vendor/firmware/piano-qcom/manifest.json",
+      "vendor/firmware/piano-touch/manifest.json"
+    ],
+    "components": "vendor/firmware"
   },
   "mesa": {
     "source": "upstream/piano-mesa-current",

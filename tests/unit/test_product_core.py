@@ -20,7 +20,8 @@ class ProductCoreTests(unittest.TestCase):
         mirror.mkdir()
         app = ROOT / 'uefi/core'
         for path in app.rglob('*.h'):
-            target = mirror / path.relative_to(app)
+            # Core sources are grouped by subsystem; the generated module is flat.
+            target = mirror / path.name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.symlink_to(path)
         (mirror / 'LateHandoff').symlink_to(ROOT / 'uefi/components/product-handoff', target_is_directory=True)
@@ -38,6 +39,8 @@ class ProductCoreTests(unittest.TestCase):
                     ROOT / 'uefi/components/nv', ROOT / 'uefi/components/reset',
                      ROOT / 'uefi/handoff/early-memory', ROOT / 'uefi/components/pogo-product',
                      ROOT / 'uefi/components/touch-product', mirror]
+        includes += [ROOT / 'uefi/components/board-identity', ROOT / 'uefi/components/rtc']
+        includes = sorted(path for path in app.iterdir() if path.is_dir()) + includes
         compiled = subprocess.run(
             ['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-Wno-misleading-indentation',
              '-fshort-wchar', '-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections',
@@ -53,20 +56,11 @@ class ProductCoreTests(unittest.TestCase):
                                 env={**os.environ, 'ASAN_OPTIONS': 'detect_leaks=1'})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_running_manager_and_real_child_required(self):
-        self.run_case('admission')
-
-    def test_clean_load_failure_returns_before_retirement(self):
-        self.run_case('before-retirement')
-
-    def test_retained_and_retirement_failures_do_not_return(self):
-        self.run_case('fatal-failures')
-
-    def test_core_identity_and_raw_handoff_order(self):
-        self.run_case('handoff-order')
-
-    def test_host_priority_returns_before_retirement(self):
-        self.run_case('host-priority')
-
-    def test_standard_efi_requires_actual_active_manager_descendant(self):
+    def test_standard_efi_requires_actual_active_uki_descendant(self):
         self.run_case('efi-admission')
+
+    def test_failed_uki_reports_original_error_without_menu_retry(self):
+        self.run_case('uki-load-failure')
+
+    def test_error_screen_uses_only_live_unretired_usb_diagnostics(self):
+        self.run_case('error-diagnostics')
