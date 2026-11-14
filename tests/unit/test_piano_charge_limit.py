@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-PATCH = ROOT / 'patches/linux/7.3/0106-power-piano-charge-limit.patch'
+PATCH = ROOT / 'patches/linux/7.3/0113-power-piano-charge-limit.patch'
 
 
 def patched_function(name):
