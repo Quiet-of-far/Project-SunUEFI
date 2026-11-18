@@ -37,7 +37,6 @@ PORTABLE = (
     'tests/unit/test_assemble_rootfs.py',
     'tests/unit/test_arch_niri_rootfs.py',
     'tests/unit/test_stage_piano_ram_hardware.py',
-    'tests/unit/test_bsp_package.py',
 )
 
 
@@ -54,6 +53,7 @@ CI_UNIT = (
     'test_gt9764.py',
     'test_piano_camera.py',
     'test_camera.py',
+    'test_bsp_package.py',
 )
 CI_NATIVE = (
     'test_dma_foundation.sh',

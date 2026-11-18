@@ -127,6 +127,7 @@ jobs:
                   ./build.sh linux
                   ;;
                 arch-niri)
+                  ./build.sh check --group ci --pattern test_bsp_package.py
                   ./build.sh uefi
                   ./build.sh module
                   ./build.sh linux
