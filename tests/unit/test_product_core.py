@@ -46,7 +46,9 @@ class ProductCoreTests(unittest.TestCase):
              '-fshort-wchar', '-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections',
              '-fsanitize=address,undefined', '-fno-pie', '-no-pie',
              *['-I' + str(path) for path in includes],
-             str(ROOT / 'tests/native/PianoProductCoreTest.c'), '-o', str(cls.executable)],
+             str(ROOT / 'tests/native/PianoProductCoreTest.c'),
+             str(ROOT / 'uefi/core/usb/PianoFastbootBoot.c'),
+             str(ROOT / 'uefi/components/os-boot/PianoUkiImage.c'), '-o', str(cls.executable)],
             capture_output=True, text=True)
         if compiled.returncode:
             raise AssertionError(compiled.stdout + compiled.stderr)
@@ -62,5 +64,8 @@ class ProductCoreTests(unittest.TestCase):
     def test_failed_uki_reports_original_error_without_menu_retry(self):
         self.run_case('uki-load-failure')
 
-    def test_error_screen_uses_only_live_unretired_usb_diagnostics(self):
+    def test_boot_fallback_requires_clean_handoff_and_yields_to_usb(self):
+        self.run_case('boot-fallback')
+
+    def test_error_screen_keeps_usb_and_prepares_storage_before_reset(self):
         self.run_case('error-diagnostics')

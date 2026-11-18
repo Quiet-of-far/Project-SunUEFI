@@ -1,6 +1,66 @@
 {
   "schema_version": 1,
   "profiles": {
+    "debian": {
+      "default_suite": "sid",
+      "depends": [
+        "systemd",
+        "udev",
+        "kmod",
+        "coreutils",
+        "alsa-ucm-conf",
+        "alsa-utils",
+        "bluez",
+        "python3",
+        "python3-gi",
+        "gir1.2-glib-2.0",
+        "mount",
+        "iproute2"
+      ],
+      "dependency_resolution_tested": false,
+      "device_tested": false,
+      "native_layer_abi_verified": false
+    },
+    "ubuntu": {
+      "default_suite": "noble",
+      "depends": [
+        "systemd",
+        "udev",
+        "kmod",
+        "coreutils",
+        "alsa-ucm-conf",
+        "alsa-utils",
+        "bluez",
+        "python3",
+        "python3-gi",
+        "gir1.2-glib-2.0",
+        "mount",
+        "iproute2"
+      ],
+      "dependency_resolution_tested": false,
+      "device_tested": false,
+      "native_layer_abi_verified": false
+    },
+    "deepin": {
+      "default_suite": null,
+      "depends": [
+        "systemd",
+        "udev",
+        "kmod",
+        "coreutils",
+        "alsa-ucm-conf",
+        "alsa-utils",
+        "bluez",
+        "python3",
+        "python3-gi",
+        "gir1.2-glib-2.0",
+        "mount",
+        "iproute2"
+      ],
+      "dependency_resolution_tested": false,
+      "device_tested": false,
+      "native_layer_abi_verified": false
+    },
     "arch": {
       "default_suite": "rolling",
       "depends": [
@@ -9,16 +69,16 @@
         "coreutils",
         "alsa-ucm-conf",
         "alsa-utils",
+        "bluez",
         "python",
-        "util-linux"
-      ],
-      "camera_depends": [
-        "wireplumber>=0.5"
+        "python-gobject",
+        "util-linux",
+        "iproute2",
+        "grep"
       ],
       "dependency_resolution_tested": false,
       "device_tested": false,
-      "native_layer_abi_verified": false,
-      "camera_profile_status": "Declared source schema; target compatibility and dependency resolution untested"
+      "native_layer_abi_verified": false
     }
   }
 }

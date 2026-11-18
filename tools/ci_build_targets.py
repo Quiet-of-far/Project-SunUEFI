@@ -30,6 +30,7 @@ UEFI_FILES = {'requirements-build.txt', 'tools/build_android_product_module.py',
 UEFI_PREFIXES = ('android/', 'uefi/', 'vendor/piano/', 'patches/firmware/',
                  'tools/prepare_product_')
 DISTROS = ['arch-niri']
+TARGETS = ('uefi', 'linux', *DISTROS)
 
 
 def select(files, manual=None):
@@ -60,7 +61,7 @@ def changed_files(root, before):
         exists = subprocess.run(['git', '-C', str(root), 'cat-file', '-e', before + '^{commit}'],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if exists.returncode == 0:
-            return subprocess.check_output(['git', '-C', str(root), 'diff', '--name-only', '-z', before, 'HEAD'], text=True).split('\0')
+            return subprocess.check_output(['git', '-C', str(root), 'diff', '--no-renames', '--name-only', '-z', before, 'HEAD'], text=True).split('\0')
     # An unavailable push base selects full from the complete tracked input set.
     return subprocess.check_output(['git', '-C', str(root), 'ls-files', '-z'], text=True).split('\0')
 

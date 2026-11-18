@@ -14,7 +14,7 @@
 | --- | --- |
 | 合体 BOOT：Android 直通 | 可用。普通开机进入原厂 Android |
 | 合体 BOOT：保存 Linux 路线并重启 | 可用。路线在 Android 侧保存，重启后经 UEFI 进入内部磁盘 Linux |
-| 标准 EFI 启动 | systemd-boot 直接加载内核 EFI stub、initramfs 和 DTB，内存布局由同次启动的原厂设备树和 SMEM 提供；旧 ESP 保留兼容入口 |
+| 标准 EFI 启动 | 产品使用标准 UKI，由驻留核心加载，未安装 systemd-boot；通用启动项、BootNext 与任意分区发现尚未实现，见[开发清单](devel/release.md#标准-uefi-启动与存储) |
 | Linux 返回 Android | 可用。`piano-next-boot android --reboot`，见[Linux 下次启动入口](devel/boot/linux-next-boot.md) |
 | 原厂 Recovery | 保留。`reboot recovery` 进入 Mi Recovery。持久 Linux 偏好与 Recovery 同时存在时的行为还没有在设备上试过 |
 | 独立 Recovery 安装 | 不可用。ABL 对“Recovery 自带内核”的分支不加载 vendor_boot 和 pvmfw，启动停在 Fastboot；合体 BOOT 走普通启动路径，绕开了这个问题。安装器拒绝 `--recovery` |
@@ -27,15 +27,15 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 存储与保护 | 可用。探测前恢复 UFS 设备就绪状态，读取 GPT、BlockIO 和 ESP 文件；原厂关键分区由代码强制只读 |
+| UEFI 存储 | 提供标准 BlockIO 读写和 ESP 文件访问。扫描只读取 GPT，不自动写盘；明确的刷写请求只操作指定目标 |
 | 交接与退出 | 启动 Linux 前清理 USB、UFS、时钟与 SMMU，无法确认安全时拒绝交接 |
 | 显示 | 合体 BOOT 进入 UEFI 后可显示菜单；延后原厂 ClockDxe 的 CESTA/media 和 DCD 启动初始化，保留继承的显示状态。见[显示定位](devel/boot/uefi-display.md) |
 | 菜单 / Setup / Shell | SimpleInit 菜单、TianoCore 中文设置页面与四倍字号可用；音量键移动、电源键确认、双音量键返回可用，见[设置页面](devel/boot/uefi-console.md)；Shell 尚未完成实机验证 |
 | Y700 四代触屏 | NT36536 的单指菜单点击、滑动可用，见[驱动说明](devel/hardware/y700-touch.md) |
-| Piano 触屏、键盘、USB Host | 产品已包含输入后端；触屏大帧读取仍有校验错误，键盘导航和 USB Host 尚未完成实机检查。菜单继续使用音量键与电源键 |
-| UEFI Fastboot | 在菜单、固件设置和 Shell 中常驻，正常 BOOT 进入时可连接；提供日志、截图、只读 `fetch`、`stage`（≤64 MiB）、`oem boot-stable` 和重启。拒绝 `flash`/`erase`；完整命令见[UEFI Fastboot](user/fastboot.md) |
+| Piano 触屏、键盘、USB Host | 固件设置中的官方键盘输入已确认，触屏能读取数据帧。点按、触控板及 USB 主机还需设备操作确认。菜单保留音量键与电源键 |
+| UEFI Fastboot | 在菜单、固件设置和 Shell 中运行，提供日志、截图、读取、暂存、刷写和重启。已在启动分区验证 raw／sparse 写入与读回。命令见 [UEFI Fastboot](user/fastboot.md) |
 | EFI 变量 | 普通非易失变量保存在 `persist/sunuefi/` 的双副本文件中；退出 Boot Services 后不再写 UFS，见[变量保存](devel/boot/uefi-console.md#persist-中的-uefi-变量) |
-| 任意 `.img` / `.efi` 启动 | 没有完成，目前只启动 ESP 中的 Linux |
+| 标准 EFI 启动 | 按 UEFI 启动顺序选择系统。已通过 systemd-boot 启动 SteamOS 的独立内核、initramfs 和设备树，也能启动旧 UKI |
 
 ## Linux 与硬件
 
@@ -43,9 +43,9 @@
 | --- | --- | --- |
 | 显示 | 3200×2136，默认 120 Hz，低分辨率缩放、144 Hz、KDE HDR／广色域切换、十位输出、夜灯、标准 Gamma／Degamma及熄屏恢复 | 12-bit／FRC 和色深选择尚未提供，见[显示位深](devel/hardware/display-depth.md) |
 | GPU | Adreno 加速的 GNOME | 部分 GTK 窗口连续缩放约 30 次/秒画面提交，需继续区分客户端处理和帧回调等待；见[窗口缩放](devel/hardware/window-resize.md) |
-| 触屏 | 点按、拖动、长按、手势，约 144 Hz | 360 Hz 未实现；依赖主机端触点算法和 uinput |
+| 触屏 | 内核直接上报标准多点触控，点按、拖动、长按与手势可用，约 144 Hz | 360 Hz 未实现 |
 | 键盘 / 触控板 | 打字、触控板、背光和睡眠恢复可用，背光走 UPower / GNOME | — |
-| 触控笔 | 定位、压感绘画、144 Hz 笔输入、轻捏与震动；磁吸识别、笔电量、充满停电以及跨系统自动重新配对 | 完整掌压、笔身滑动及应用快捷手势仍需完善，见[笔协议](devel/hardware/pen-protocol.md) |
+| 触控笔 | Focus Pen Pro 在 120 Hz 下通过内核 evdev 完成定位与压感绘画，GNOME 原生数位板页识别物理 SPI 设备；保留磁吸、笔电量、充满停电和自动重新配对 | 两种笔、手势和掌压的覆盖范围见[笔协议](devel/hardware/pen-protocol.md)与[已知问题](user/known-issues.md#触控笔) |
 | Wi-Fi | 可用 | 新系统需自行保存网络连接 |
 | 蓝牙 | 可用，使用 p81 板级 NVM，已修复连接距离过短；启动时自动读取本机原厂地址 | 原厂地址缺失时提供稳定硬件标识派生方案，见[蓝牙配置](devel/hardware/bluetooth.md) |
 | Linux USB 3 | 标准 Type-C 方向和角色切换、5 Gbit/s USB 调试网络 | 首次连接时序继续核对，见[USB Type-C](devel/linux/kernel.md#usb-type-c) |
@@ -54,7 +54,7 @@
 | 麦克风 | 录音、原生单声道 ALSA / PipeWire 输入及睡眠恢复，硬件增益 +40 dB | — |
 | 相机 | 前后预览、录像、自动曝光／对焦／白平衡及首帧恢复，CAMSS/TFE 硬件 ISP | 实现见[相机与闪光灯](devel/hardware/camera-flash.md)，手动接口见[相机控制](devel/hardware/camera-controls.md) |
 | 相机隐私灯 | 摄像头工作时实体绿色指示灯亮起，随视频流和前后摄像头切换启停 | — |
-| 闪光灯 | 两路标准 LED 已注册，限值已读回 | 实际发光和曝光同步未观察 |
+| 闪光灯 | 两路标准 LED 接受手电筒开关请求，关闭后读回零，无故障标志 | 实际发光和曝光同步还没有确认，见[实现说明](devel/hardware/camera-flash.md) |
 | 传感器 | 自动旋转、光线、距离、罗盘及标准 SensorProxy 接口 | 实现见[传感器](devel/hardware/sensors.md) |
 | 自动亮度 | 桌面联动可用，GNOME 策略沿用原厂 lux 阈值与延迟，传感器数据不做修改 | 见[自动亮度](devel/hardware/auto-brightness.md) |
 | 夜灯 / 色温 | GNOME 夜灯可用，自动生成内置屏幕的颜色配置 | 通用 sRGB 配置，不是原厂校准 |
@@ -62,8 +62,8 @@
 | GNOME 电源模式 | 节能／平衡／性能三档可用，默认平衡，由 TuneD 与 tuned-ppd 提供 | 档位调整 CPU／GPU 上限，不改变待机功耗，见[电源模式](devel/hardware/power-profiles.md) |
 | 视频编解码 | ✅ | Iris 硬件加速与 V4L2 编解码可用，提供适配的 FFmpeg 软件包 |
 | SteamOS / Proton / FEX | ✅ | 游戏模式和桌面模式正常运行，ARM64 Proton 与 FEX 支持良好（个别游戏需自身参数，与项目本身无关） |
-| 指纹 | Linux 独立录入、保存与认证，标准 libfprint／fprintd 接口 | 不读取 Android 的指纹模板，不提供跨用户识别；见[指纹实现](devel/hardware/led-ir-fingerprint.md#侧指纹) |
-| 红外 / RGB 灯 | RGB 标准 LED 接口、红外标准 LIRC 驱动和原厂波形量化已接入 | 红外光学输出未测量 |
+| 指纹 | 旧传输路径完成 Linux 独立录入、保存与认证；自包含 Linux TEE 路径完成初始化及 fprintd 枚举 | 新路径还缺录入、重开模板及匹配／不匹配复测，不沿用旧路径结果；见[指纹实现](devel/hardware/led-ir-fingerprint.md#侧指纹) |
+| 红外 / RGB 灯 | 红外标准 LIRC 发送成功，超长请求被拒绝后可继续发送；RGB 提供标准 LED 接口 | 红外载波、包络与距离未测量；RGB 发光位置未确认 |
 | 默认桌面 | 中文界面、拼音输入法、Chromium 浏览器，GNOME 动画开启 | — |
 | Windows / WinPE | 目标 | 未启动 |
 

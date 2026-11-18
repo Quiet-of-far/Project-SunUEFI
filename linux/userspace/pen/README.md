@@ -1,8 +1,13 @@
 # Piano 手写笔核心
 
-这里保存 Piano 的开源笔解码核心、触控进程内的笔输入接线、离线工具，以及保留的原厂算法诊断 worker。笔和手指共用现有 THP 数据读取进程，不增加第二个触控流读取者。
+这里包含笔的 BlueZ 初始化、离线解码工具和手动诊断代码。产品的笔和手指由内核直接上报。
 
-**标准笔输入已能绘画，位置正确，线宽随压力变化。** 当前结果来自本机 120 Hz 冷启动环境，Linux 已收到 Report5 压力和屏幕 type29 矩阵。144 Hz 下的笔输入尚未确认；轻捏按键、重连后的反馈参数和画板笔光标已写入默认源码；新版本仍需实机确认。轻捏、双击笔身和笔身滑动见[笔身手势](#笔身手势)。
+校准经设备配置包安装到标准固件目录。`pen-control.py` 只执行 BlueZ
+FE11/FE12 初始化；发布构建必须有匹配的内核笔驱动和校准。输入链、校准、
+两笔限制和许可依据见
+[内核输入与许可边界](../../../docs/devel/hardware/pen-protocol.md#内核输入与许可边界)。
+
+Focus Pen Pro 已在新整数内核解码器上完成 120 Hz 压感绘画，物理 evdev 的压力范围为 0..16383，双轴倾角有变化。弱悬停、倾角精度、完整四边和掌压仍需实机对照。普通笔与刷新率的范围见[内核输入说明](../../../docs/devel/hardware/pen-protocol.md#内核输入与许可边界)。轻捏、双击笔身和笔身滑动见[笔身手势](#笔身手势)。
 
 ## 普通 Focus Pen
 
@@ -48,9 +53,11 @@ build/pen-core/piano-pen-offline --ini ACTUAL.ini --pressure-max-age-ns N --even
 
 事件文件每行使用同一 BOOTTIME 时基：`时间戳 report5|report2|raw29 捕获文件`，或者 `时间戳 reset -`。`report2` 是两字节的笔身手势报告，输出其中的值和手势名称。未知字段输出 `null`。工具已经读取 BOE／CSOT 配置、原厂651个压力报告，以及 Linux 的 type29／Report5 序列。后者得到1177帧有效坐标与倾角，其中896帧同时具有有效压力；没有制作 raw29 测试帧。膜／悬浮专用分支、完整掌压干扰与边缘体验仍需要实机对照。
 
-## 同一触控进程中的笔输入
+## 对照用的用户态笔输入
 
-`piano-pen-owner.c/.h` 将只读蓝牙 HID 压力、已由触控进程读取的 type29、同源 BOOTTIME 时间戳与标准 tablet-tool 输入连接起来。只有显式提供校准和压力有效期时才启用笔路径。手指由内核接管时，程序只处理笔，不再创建虚拟触屏；没有笔或诊断请求时直接退出。旧内核仍沿用用户空间手指输入。正常 runtime 已编入该功能，不需要额外编译另一份触控程序。
+`piano-pen-owner.c/.h` 将只读蓝牙 HID 压力和 type29 帧与标准 tablet-tool
+输入连接起来，供开发者在隔离环境中对照解码结果。必须显式提供校准和压力有效期；
+日常书写使用内核路径，勿在实体笔输入运行时另外启动虚拟笔。
 
 ```sh
 piano-touch-view input --seconds 0 \
@@ -76,7 +83,7 @@ Android 轻捏已经捕获到 `02 6e`／`02 00` Report2，与 `KEY_F19` 的 DOWN
 
 ## 原厂无线初始化
 
-[`piano-pen-bluetooth.py`](piano-pen-bluetooth.py) 使用系统 BlueZ 完成原厂控制序列：读取笔信息、两轮分配 ID并设置参数／频率／电压、发送时间戳和磁吸状态，最后设置轻捏与屏幕状态。每一步等待回应，ID来自笔的回应，主机地址来自当前蓝牙适配器；不内嵌配对密钥或设备地址。
+[`pen-control.py`](../../bsp/common/usr/lib/piano/pen-control.py) 使用系统 BlueZ 完成原厂控制序列：读取笔信息、两轮分配 ID并设置参数／频率／电压、发送时间戳和磁吸状态，最后设置轻捏与屏幕状态。每一步等待回应，ID来自笔的回应，主机地址来自当前蓝牙适配器；不内嵌配对密钥或设备地址。
 
 无线参数保存在 [`p81c-radio.json`](../../bsp/common/usr/share/piano/pen/p81c-radio.json)，依据本机 `OS3.0.309.0.WPYCNXM` 的原厂服务发送结果整理，与解算用的 BOE／CSOT ini不同。这个原厂版本的运行时 `TIME_STAMP` 是1745566508，选择普通参数表；不能把屏幕144Hz直接当作笔的频率参数。
 
@@ -91,7 +98,7 @@ Android 轻捏已经捕获到 `02 6e`／`02 00` Report2，与 `KEY_F19` 的 DOWN
 已安装磁吸草案和活动状态接口的设备，可显式运行：
 
 ```sh
-sudo /usr/lib/piano/pen-bluetooth --address YOUR_PEN_ADDRESS \
+sudo /usr/lib/piano/pen-control.py --address YOUR_PEN_ADDRESS \
   --profile /usr/share/piano/pen/p81c-radio.json \
   --stationary-device /proc/nvt_thp_pen_stationary
 ```
@@ -102,7 +109,9 @@ sudo /usr/lib/piano/pen-bluetooth --address YOUR_PEN_ADDRESS \
 
 P81C 的 137 字节 HID Report Map 将私有 Report5 数据放在键盘 Usage Page 的 `0x57`，Linux 通用 HID 会将它映射为 `KEY_KPPLUS`。压力包的四个 16 位字段和六个 8 位字段不是十个加号按键。默认内核的[输入补丁](../../../patches/linux/7.3/0003-input-wireless.patch)扩展现有 `hid-xiaomi`，按 Bluetooth VID/PID、Report ID 和字段布局跳过这条错误键盘映射，保留原始 hidraw 数据给笔输入程序。它不替换整份描述符，不全局屏蔽 `+`，也不影响键盘保护套。
 
-`piano-touch-input` 在现有触控服务中启动 `pen-bluetooth --follow` 伴随进程。它只走 BlueZ，不读取 THP、也不生成键鼠输入；连接和 `ServicesResolved` 后完成初始化，断连后等待下一次连接重新发送反馈参数。磁吸状态只在开关存在时转发；没有磁吸／静止接口不阻塞已知的 BLE 功能。它支持当前笔返回的设备版本，不把 Modalias 硬锁到旧 `d0001`。`DA 01 01` 说明反馈设置被接收，物理震动仍需要轻捏确认。
+`piano-touch.service` 通过 BlueZ 初始化并跟随连接，不读取 THP 或生成键鼠输入。
+笔连接并且 `ServicesResolved` 就绪后发送配置，断连后等待重新连接。磁吸状态来自
+标准开关；缺少该开关时仍可完成 BLE 初始化。
 
 断连时，伴随进程从 BlueZ 枚举已开启的适配器，尝试连接已配对、受信任的 Focus Pen 或 Pro。SC96231 内核驱动从磁吸链路提供笔的准确地址后，程序优先使用该地址；BlueZ 报告认证失败时，只清除这支笔失效的配对并通过标准 Agent1／Device1 接口重新配对。配对代理不成为系统默认代理，不接受其他设备。原厂 Android 与 Linux 交替使用后，已完成自动删除旧配对、重新配对、恢复 GATT 控制服务和初始化。
 
@@ -125,19 +134,29 @@ P81C 的 137 字节 HID Report Map 将私有 Report5 数据放在键盘 Usage Pa
 
 滑动由内核 `hid-xiaomi` 的 [`0029` 补丁](../../../patches/linux/7.3/0029-hid-xiaomi-p81c-body-gestures.patch)直接映射为 Page Up／Page Down，发给当前窗口，与键盘上的翻页键相同；它不依赖这里的程序，其他发行版使用同一内核也能得到。通用 HID 原本会把双击和滑动变成小键盘回车、`9` 和 `3`，补丁去掉了这些映射，也不再发送轻捏的 F19。
 
-轻捏和双击由同一触控进程读取 hidraw，作为笔按钮发给 tablet-tool 节点，只在笔处于感应范围内时上报；抬出范围、断连、流中断时释放按钮。设置 `PIANO_PEN_SQUEEZE_ACTION=stylus` 时轻捏始终作为 `BTN_STYLUS`。不支持笔的应用通常把 `BTN_STYLUS` 当作中键、`BTN_STYLUS2` 当作右键；绘图应用可以把两个按钮绑定到橡皮擦、取色等工具。双击或滑动打断仍按住的轻捏时，轻捏结束但不算一次点击。
+内核在 HID／触控驱动内融合轻捏和双击，只在笔处于感应范围内时上报工具按钮，
+抬出范围、断连或数据超时后释放。轻捏短按点击，长按 600 ms 触发 `BTN_STYLUS`。
+不支持笔的应用通常把 `BTN_STYLUS` 当作中键、
+`BTN_STYLUS2` 当作右键；绘图应用可将其绑定到橡皮擦或取色工具。
+双击或滑动打断轻捏时，轻捏结束但不算一次点击。
 
-笔尖受压时笔不发送手势，停笔片刻后才会识别。双击和滑动的开关保存在笔里，`pen-bluetooth` 按 `p81c-radio.json` 的 `double_tap` 与 `slide` 在每次连接时打开它们；改为 `false` 后重启 `piano-touch.service` 即可在笔端关闭。原厂在双击和滑动时会让平板另发一次振动命令，Linux 不发送，因此这两个手势没有笔端振动。
+笔尖受压时笔不发送手势，停笔片刻后才会识别。双击和滑动的开关保存在笔里，`pen-control.py` 在每次连接时应用配置中的 `double_tap` 与 `slide`；改法见[笔协议说明](../../../docs/devel/hardware/pen-protocol.md)。原厂在双击和滑动时会让平板另发一次振动命令，Linux 不发送，因此这两个手势没有笔端振动。
 
 双击与滑动的报告格式来自笔固件和原厂系统，尚无平板上的实测记录。在平板上检查时，`sudo libinput debug-events --show-keycodes` 应在笔的键盘设备上显示 `KEY_PAGEUP`／`KEY_PAGEDOWN`，在 `Piano Focus Pen Pro` 上显示 `BTN_STYLUS2`；`sudo evtest` 可分别查看两个设备。只看原始 Report2 的命令见协议页。
 
 ## 构建与校准打包入口
 
-`tools/build_release_helpers.py` 与 `tools/build_piano_runtime_helpers.py` 已共用 `build_pen_core()`，从源码副本调用这里的 Makefile。默认 native runtime bundle 包含 `/usr/bin/piano-pen-offline`、`/usr/bin/piano-pen-canvas`、`/usr/lib/piano/pen-bluetooth`，以及 Apache-2.0 许可和来源说明。编译清单记录 C／C++ 源码、头文件、Makefile、工具链和目标静态 C++ 库；离线工具是 ARM64 静态程序，构建不需要原厂 ini。
+`tools/build_release_helpers.py` 与 `tools/build_piano_runtime_helpers.py` 共用 `build_pen_core()`，从源码副本调用这里的 Makefile。运行文件包含 `/usr/bin/piano-pen-offline`、`/usr/bin/piano-pen-canvas`，以及 Apache-2.0 许可和来源说明。编译清单记录 C／C++ 源码、头文件、Makefile、工具链和目标静态 C++ 库；离线工具是 ARM64 静态程序，构建不需要原厂 ini。蓝牙程序和服务由 `piano-device-config` 安装，不进入这份诊断工具构建。
 
 `libpiano-pen-core.a` 包含 C 编译的 owner／frame 与 C++ 编译的 core／decoder，已经静态链接到正常构建的 `piano-touch-view`，库文件本身不安装进系统。触控源码和入口包装保留 C ABI，最终链接使用同一目标 sysroot 的 C++ 链接器。rootfs 通过现有 `runtime.stage()` 安装程序并保留补丁、owner 和核心源码的来源记录。
 
-原生 ELF 不能放进现有 `Architecture: all` 配置包。`tools/package_bsp.py` 当前只接受配置文件；原生程序放在 native runtime 层。ini 本身是架构无关数据，但需要作为明确的原厂输入单独登记，安装到 `/usr/share/piano/pen/calibration/`。构建应显式接收含 BOE／CSOT 两份 ini 的输入目录，记录 ROM 版本、来源及文件摘要，不能默认读取某台开发电脑的 `内部记录目录 路径。当前公开 `piano-firmware` 输入有触控固件 bin，但没有这两份 ini；本地和 CI 必须使用同一份明确的校准输入，不能各自从隐藏目录补文件。校准数据的自动提取与打包尚未接入；缺失校准时不会自动使用另一面板的配置。
+原生 ELF 不放进 `Architecture: all` 配置包。BSP 维护带来源与 SHA256 的数字校准，
+在 `/usr/lib/firmware/novatek/piano-{boe,csot}-pen.ini` 建立指向已有数据的相对
+链接，供标准固件加载器使用。运行时构建器检查匹配内核、notifier 导出符号及
+目标根目录中的校准；新内核缺任何一项就报错。两条构建入口将内核与校准摘要
+写入相同的清单，安装时再次校验。
+`--sysroot` 只选择编译环境；校准默认在该目录检查，跨发行版构建通过
+`--firmware-root` 指定已从同一 BSP 安装校准的目标 rootfs。
 
 ## 保留的原厂算法 worker
 

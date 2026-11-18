@@ -16,16 +16,22 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TARGET = 'release'
-SERIES_FILE = 'patches/linux/7.3/series.json'
-_release = json.loads((ROOT / SERIES_FILE).read_text())
+
+
+def release_series(root, kernel):
+    return json.loads((root / kernel['patch_series']).read_text())
+
+
+_kernel = json.loads((ROOT / 'config/release.json').read_text())['kernel']
+_release = release_series(ROOT, _kernel)
 TARGETS = {DEFAULT_TARGET: {
     **{key: _release[key] for key in (
         'base_commit', 'target_tree', 'original_target_commit', 'source_url')},
-    'series_file': SERIES_FILE,
+    'series_file': _kernel['patch_series'],
     'kernel_version': _release['kernel_version'],
     'worktree_name': 'release',
     'manifest_directory': 'release',
-    'source_mirrors': json.loads((ROOT / 'config/release.json').read_text())['kernel'].get('stable_source_mirrors', []),
+    'source_mirrors': _kernel.get('stable_source_mirrors', []),
 }}
 COMMITTER_NAME = 'slwyts'
 COMMITTER_EMAIL = 'slwyts@foxmail.com'
@@ -324,9 +330,10 @@ def prepare(root=ROOT, repository=None, worktree=None, source_manifest=None, tar
     series, patches, series_hash = load_series(root, target)
     policy = TARGETS[target]
     paths = update_patches(root, policy)
-    # Source snapshots follow their content, while one generated record selects
-    # the current release. Updating a pin never resets an older checkout.
-    default_name = policy.get('worktree_name', target) + '-' + policy['target_tree'][:12]
+    # Folding or reordering patches can leave the final tree unchanged.
+    # Keep each series in its own checkout so exact provenance still matches.
+    default_name = (policy.get('worktree_name', target) + '-' +
+                    policy['target_tree'][:12] + '-' + series_hash[:12])
     work = Path(worktree or root / 'build/kernel-worktrees' / default_name).resolve()
     marker = Path(source_manifest or root / 'build' / policy.get('manifest_directory', 'release-kernel') / 'source-manifest.json').resolve()
     if not work.is_relative_to(root / 'build/kernel-worktrees'):

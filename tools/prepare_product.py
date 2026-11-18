@@ -21,12 +21,14 @@ import piano_vendor_inputs as vendor_inputs
 from core_source import core_source, has_core_source
 
 CORE_GUID='35E0D1B5-93CE-4D6A-9A93-6ADAA3F26C40'
+SIMPLEINIT_BOOT_MODULE='Applications/SimpleInitBoot/SimpleInitBoot.inf'
+BOOT_PICKER_MODULE='MdeModulePkg/Application/BootManagerMenuApp/BootManagerMenuApp.inf'
 OS_BOOT_SOURCE_BUDGET=128*1024*1024
 SOURCE_NAMES=(
     'PianoProductCore.c','PianoBootOptions.c','PianoProductBootLog.c','PianoProductDisplayObserve.c','PianoDisplaySmmuObserve.c','PianoFrameBufferMappingObserve.c','PianoDisplayClockObserve.c','PianoProductDisplayOwner.c','PianoDisplayClockLease.c','PianoDisplayClockRead.c','PianoBootPolicy.c','PianoFvApplication.c','PianoProductPayload.c','PianoProductOwners.c','PianoRamPartition.c','PianoProductSmem.c','PianoProductMemory.c',
     'NativeProbe.c','PianoKeys.c','PianoFaultRecovery.c',
     'PianoSmmu.c','PianoDma.c','PianoOwnedSmmu.c','PianoIoPageTable.c',
-    'PianoUfsProbe.c','PianoUfsReadOnlyDma.c','PianoUfsDmaLayout.c','PianoGpt.c','PianoReadOnlyBlock.c',
+    'PianoUfsProbe.c','PianoUfsReadOnlyDma.c','PianoUfsDmaLayout.c','PianoGpt.c','PianoBlockIo.c',
     'PianoUfsProductVolume.c','PianoUfsBoundedLayout.c',
     'PianoFastboot.c','PianoFastbootBlockRead.c','PianoFastbootBoot.c','PianoFastbootLaunch.c','PianoFastbootDownloadBlob.c','PianoRawLinuxBoot.c','PianoPanelSelection.c',
     'PianoFastbootScreen.c','PianoDwc3Device.c','PianoUsbControl.c','PianoUsbController.c','PianoUsbPhy.c',
@@ -41,7 +43,7 @@ PRODUCT_COMPONENTS={
     'pogo-product':('PianoPogoDxe.c','PianoPogoDxe.h','PianoPogoBoard.c','PianoPogoBoard.h',
                     'PianoPogoMcu.c','PianoPogoMcu.h','PianoPogoService.c','PianoPogoService.h'),
     'usb-host':('PianoUsbHost.c','PianoUsbHost.h','PianoUsbTypec.c','PianoUsbTypec.h'),
-    'touch-product':('PianoGeniSpiPio.c','PianoGeniSpiPio.h','PianoTouchNvt.c','PianoTouchNvt.h',
+    'touch-product':('PianoGeniSpiGpi.c','PianoGeniSpiGpi.h','PianoTouchNvt.c','PianoTouchNvt.h',
                      'PianoTouchMatrix.c','PianoTouchMatrix.h','PianoTouchService.c','PianoTouchService.h'),
 }
 PIANO_FIRMWARE='vendor/firmware'
@@ -49,7 +51,7 @@ POGO_FIRMWARE_NAME='nanosic/MCU_Upgrade.bin'
 # Indexed by the touch lcd-id level, like firmware-name in the Linux DT
 TOUCH_FIRMWARE_NAMES=(('Csot','novatek/novatek_nt36532_piano_fw_csot.bin'),('Boe','novatek/novatek_nt36532_piano_fw_boe.bin'))
 COMPONENT_C_SOURCES=tuple(name for names in PRODUCT_COMPONENTS.values() for name in names if name.endswith('.c'))
-OS_BOOT_SOURCES=('PianoBootFileSource.c','PianoCpuImageLoan.c','PianoLinuxEfiSession.c','PianoCpuInput.c','PianoEspBootSource.c')
+OS_BOOT_SOURCES=('PianoBootFileSource.c','PianoCpuImageLoan.c','PianoLinuxEfiSession.c','PianoCpuInput.c','PianoUkiImage.c')
 OS_BOOT_HEADERS=tuple(name[:-2]+'.h' for name in OS_BOOT_SOURCES)
 LATE_HANDOFF_INF_SOURCES=tuple('LateHandoff/'+name for name in ('PianoLateHandoff.c','PianoLateHandoff.h','PianoDeviceTreeFixup.c','PianoDeviceTreeFixup.h'))
 OS_BOOT_INF_SOURCES=tuple('Components/os-boot/'+name for name in (*OS_BOOT_SOURCES,*OS_BOOT_HEADERS))
@@ -59,7 +61,7 @@ OBSERVATION_FAMILIES={'early-memory':('PianoSmemRam.c','PianoSmemRam.h','PianoMe
 OBSERVATION_INF_SOURCES=tuple(name for names in OBSERVATION_FAMILIES.values() for name in names)
 PRODUCT_FLAGS=('PIANO_USB_SERVICE=1','PIANO_USB_EP0=1','PIANO_USB_FASTBOOT=1','PIANO_USB_SCREENSHOT=1',
     'PIANO_USB_UFS_FETCH=1','PIANO_USB_RAM_BOOT=1','PIANO_USB_POWER_PROBE=1','PIANO_UFS_BLOCKIO=1',
-    'PIANO_UFS_PRODUCT_STORAGE=1','PIANO_NV_BOOT_ONLY=1','PIANO_PRODUCT_NATIVE_LATE=1','PIANO_USB_HOST=1')
+    'PIANO_UFS_PRODUCT_STORAGE=1','PIANO_PRODUCT_NATIVE_LATE=1','PIANO_USB_HOST=1')
 NATIVE_NAMES=vendor_inputs.NATIVE_NAMES
 EARLY_DXE_SOURCE='vendor/piano/early-dxe/EnvDxeEnhanced'
 EARLY_DXE_NAMES=('EnvDxeEnhanced.inf','EnvDxeEnhanced.efi','EnvDxeEnhanced.depex')
@@ -73,6 +75,15 @@ HOST_MODULES=('MdeModulePkg/Bus/Pci/XhciDxe/XhciDxe.inf','MdeModulePkg/Bus/Usb/U
 
 
 def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def simpleinit_boot_guid_header(root=ROOT):
+    inf=root/'uefi/components/product-support'/SIMPLEINIT_BOOT_MODULE
+    guid,=(uuid.UUID(line.split('=',1)[1].strip()) for line in inf.read_text().splitlines()
+           if line.strip().startswith('FILE_GUID ='))
+    first,second,third=guid.fields[:3]
+    tail=','.join(f'0x{byte:02x}' for byte in guid.bytes[8:])
+    return ('STATIC CONST EFI_GUID mPianoSimpleInitBootFileGuid='
+            f'{{0x{first:08x},0x{second:04x},0x{third:04x},{{{tail}}}}};\n')
 
 
 def verify_display_mapping(root,target,record):
@@ -279,10 +290,10 @@ def backend_status():
       'pogo_keyboard_touchpad':{'status':'IMPLEMENTED_UNTESTED','transport':'QUP1 SE6 GENI I2C FIFO/PIO, 1 MHz, no DMA',
         'physical_evidence':'MCU RAM firmware verified; cover attachment and runtime commands accepted; clean release before Linux',
         'missing':'physical keystrokes, touchpad clicks/motion and unplug/replug'},
-      'touchscreen':{'status':'IMPLEMENTED_UNTESTED','transport':'QUP1 SE2 GPIO SPI, 64-byte chip-select intervals, no DMA',
+      'touchscreen':{'status':'IMPLEMENTED_UNTESTED','transport':'QUP1 SE2 hardware SPI with polled GPI1 DMA and an owned SMMU domain',
         'sequence':'Linux nt36xxx probe without a DRM panel follower: eng reset, chip-ID trim, per-panel host download, THP frames',
-        'physical_evidence':'firmware loaded, idle matrix baseline established and standard protocol polled; clean release before Linux',
-        'missing':'touching the panel causes persistent frame checksum failures; no physical menu clicks'},
+        'physical_evidence':'the replaced GPIO transport loaded firmware but failed frame checksums during touch; the GPI transport has not run on the tablet',
+        'missing':'GPI register access, chip identity, complete frame checksums, menu clicks and clean DMA/domain retirement on the tablet'},
       'dma_smmu':{'status':'IMPLEMENTED_STRICT_OWNERS','physical_evidence':'test91 readonly fetch and exact combined USB/UFS retirement passed; resident product retirement still untested','ram_partition_inventory':'AUDITED_NATIVE_ABI_LINKED_UNTESTED','smem_observation':'READ_ONLY_COLD_SEC_AND_DXE_BOUND_UNTESTED','sec_early_ready':False,'high_ddr_mapped':False,'high_ram_ownership_verified':False},
       'ufs_blockio_read_write':{'status':'RESERVED_VOLUME_BACKEND_UNPROVISIONED','original_media':'READ_ONLY','missing':'explicit permanent reservation, provisioning approval and product physical RW acceptance'},
       'gpt':{'status':'IMPLEMENTED_READ','physical_evidence':'real UFS GPT reads; product untested'},
@@ -402,6 +413,7 @@ def core_inf():
   SynchronizationLib
   HobLib
 [Guids]
+  gEfiGlobalVariableGuid
   gEfiConsoleInDeviceGuid
   gEfiEventExitBootServicesGuid
   gEfiEventBeforeExitBootServicesGuid
@@ -495,6 +507,8 @@ def prepare(root=ROOT):
         nested.parent.mkdir(parents=True,exist_ok=True)
         shutil.copyfile(path,nested)
     shutil.copytree(source/'Protocol',app/'Protocol')
+    shutil.copyfile(source/'Protocol/PianoRawPartitionWrite.h',
+                    root/'upstream/Mu-Silicium/Mu_Basecore/MdePkg/Include/Protocol/PianoRawPartitionWrite.h')
     for component,names in PRODUCT_COMPONENTS.items():
         for name in names:shutil.copyfile(root/'uefi/components'/component/name,app/name)
     pogo_firmware=prepare_pogo_firmware(root,app)
@@ -506,6 +520,7 @@ def prepare(root=ROOT):
     late_provider['os_image_armed']=False
     observation=prepare_observation_families(root,app)
     (app/'PianoProductSimpleInitDigest.h').write_text(header)
+    (app/'PianoSimpleInitBootGuid.h').write_text(simpleinit_boot_guid_header(root))
     shutil.copyfile(root/'upstream/Mu-Silicium/Mu_Basecore/MdeModulePkg/Universal/Console/GraphicsConsoleDxe/PianoChineseGlyphs.h',app/'PianoChineseGlyphs.h')
     (app/'ProductCore.inf').write_text(core_inf())
     from firmware.prepare_ext4 import prepare as prepare_ext4
@@ -555,7 +570,6 @@ def prepare(root=ROOT):
   }
   MdeModulePkg/Logo/LogoDxe.inf
   pianoProductPkg/Drivers/PianoExt4Dxe/PianoExt4Dxe.inf
-  pianoProductPkg/Applications/LinuxBoot/LinuxBoot.inf
   MdeModulePkg/Bus/Pci/XhciDxe/XhciDxe.inf
   MdeModulePkg/Bus/Usb/UsbMouseDxe/UsbMouseDxe.inf
   pianoProductPkg/Drivers/PianoGopDxe/PianoGopDxe.inf
@@ -579,6 +593,7 @@ def prepare(root=ROOT):
       NULL|ShellPkg/Library/UefiShellInstall1CommandsLib/UefiShellInstall1CommandsLib.inf
   }
 '''
+    text+='  pianoProductPkg/'+SIMPLEINIT_BOOT_MODULE+'\n'
     text+=SETUP_DSC_ADDITIONS
     # All service flags bind actual product implementations; diagnostics are
     # not dispatched. FETCH enables the shared live SMMU storage guard.
@@ -589,7 +604,9 @@ def prepare(root=ROOT):
     dsc.write_text(text)
     fdf=target/'pianoProduct.fdf';text=fdf.read_text().replace('# Host-only stage-0 diagnostic; NOT hardware validated.','# Single PianoUEFI product integration candidate; INCOMPLETE_NOT_RELEASE.')
     text=text.replace('SiliciumPkg/Drivers/SimpleFbDxe/SimpleFbDxe.inf','pianoProductPkg/Drivers/PianoGopDxe/PianoGopDxe.inf')
-    modules=DISK_MODULES+HOST_MODULES+SETUP_FV_MODULES+('MdeModulePkg/Logo/LogoDxe.inf',ext4['module'],'ShellPkg/Application/Shell/Shell.inf','pianoProductPkg/Applications/LinuxBoot/LinuxBoot.inf','pianoProductPkg/Applications/ProductCore/ProductCore.inf')
+    modules=DISK_MODULES+HOST_MODULES+SETUP_FV_MODULES+(
+        BOOT_PICKER_MODULE,'pianoProductPkg/'+SIMPLEINIT_BOOT_MODULE,'MdeModulePkg/Logo/LogoDxe.inf',
+        ext4['module'],'ShellPkg/Application/Shell/Shell.inf','pianoProductPkg/Applications/ProductCore/ProductCore.inf')
     text=text.replace('!include SiliciumPkg/Common.fdf.inc',''.join('  INF '+module+'\n' for module in modules)+native_fdf+'\n!include SiliciumPkg/Common.fdf.inc')
     fdf.write_text(text)
     early_memory=prepare_early_memory(root,target)

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build shared FFmpeg BSP patches as native SteamOS or Arch packages.
 
-Preserve the target's codec configuration and library ABI. FFmpeg 7.0/7.1
-use the shared Debian source; FFmpeg 8 and 9 use their matching patch ports.
+Preserve the target's codec configuration and library ABI. SteamOS FFmpeg 8
+and Debian/Nyarch FFmpeg 9 share the same stateful decoder and encoder fixes.
 """
 import argparse
 import json
@@ -17,6 +17,7 @@ import sys
 import prepare_ffmpeg_source as source
 from rootfs.arch import guest_environment
 from rootfs.common import build_resolver
+from build import overlay_release
 from desktop import package_build
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,10 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def patch_series(package_version):
     version = package_version.split(':')[-1]
-    if re.match(r'^7\.[01](?:[.\s-])', version):
-        return source.SERIES
     if re.match(r'^8\.1(?:\.\d+)?-', version):
-        return source.SERIES.with_name('series-8.json')
+        return ROOT / 'linux/bsp/patches/ffmpeg/series-8.json'
     if re.match(r'^9\.0\.2-', version):
         return ROOT / 'patches/ffmpeg/9.0.2/series.json'
     raise ValueError('Port the BSP fixes to the installed FFmpeg ABI before replacing ' + package_version)
@@ -44,6 +43,7 @@ def is_current(output):
         patches = [{'path': str((series_path.parent / row['path']).resolve().relative_to(ROOT)),
                     'sha256': row['sha256']} for row in series['series']]
         return (record['local_revision'] == series['local_revision'] and
+                record.get('overlay_release') == overlay_release.generation() and
                 record['archive_sha256'] == archive['sha256'] and
                 record['patches'] == patches and
                 all(source.sha(ROOT / row['path']) == row['sha256'] for row in patches) and
@@ -101,7 +101,7 @@ def build(root, output, resume=False):
     if not re.fullmatch(r'\d+(?:\.\d+)?', release):
         raise ValueError('Unsupported pacman package release: ' + release)
     major, _, rebuild = release.partition('.')
-    pkgrel = major + '.' + str(int(rebuild or '0') + 1)
+    pkgrel = overlay_release.pacman_release(major + '.' + str(int(rebuild or '0') + 1))
     epoch = package_version.split(':')[0] if ':' in package_version else '0'
     output.mkdir(parents=True, exist_ok=resume)
     provenance = (json.loads((output / 'source/SOURCE.json').read_text())
@@ -157,6 +157,7 @@ def build(root, output, resume=False):
     shutil.copy2(package, output / package.name)
     provenance.update(package_format='pacman', packages_built=True, original_configuration=options,
                       package=package.name, package_sha256=source.sha(package),
+                      overlay_release=overlay_release.generation(),
                       installed_version=version, device_verified=False)
     (output / 'SOURCE.json').write_text(json.dumps(provenance, indent=2) + '\n')
     (output / 'manifest.json').write_text(json.dumps({

@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Build the public runtime helpers with an explicit, recorded host toolchain."""
 import argparse
-import hashlib
 import json
-import os
 from pathlib import Path
 import platform
 import shutil
@@ -11,8 +9,7 @@ import subprocess
 
 import build_piano_runtime_helpers as runtime
 import build_piano_fingerprint
-from desktop import prepare_kernel_llvm
-from prepare_linux_modules import modinfo
+from prepare_release_kernel import release_series
 
 ROOT = Path(__file__).resolve().parents[1]
 STABLE_UAPI_COMMIT = '5fce161649b4d779d1b76d9fcd52dc77779774b8'
@@ -25,13 +22,18 @@ def inputs_current(output):
     if not path.is_file():
         return False
     record = json.loads(path.read_text())
+    pen = record.get('pen_core', {})
+    if pen.get('input', {}).get('mode') != 'kernel':
+        return False
+    pen_source = ROOT / 'linux/userspace/pen'
+    pen_paths = [Path(runtime.__file__),
+                 *[pen_source / name for name in runtime.PEN_SOURCE_FILES],
+                 pen_source / 'piano-pen-canvas.py',
+                 *[ROOT / name for name in runtime.PEN_CALIBRATION_PATHS.values()]]
     return (
         record.get('producer', {}).get('sha256') == runtime.sha(Path(__file__))
-        and record.get('module_toolchain_inputs') == {
-            str(path.relative_to(ROOT)): runtime.sha(path)
-            for path in (Path(prepare_kernel_llvm.__file__), prepare_kernel_llvm.POLICY)
-        }
-        and record.get('camera', {}).get('inputs') == runtime.camera_inputs()
+        and all(pen.get('inputs', {}).get(str(path)) == runtime.sha(path)
+                for path in pen_paths)
         and record.get('fingerprint', {}).get('inputs')
         == build_piano_fingerprint.source_inputs()
     )
@@ -39,8 +41,9 @@ def inputs_current(output):
 
 def expected_uapi_digest(source, commit):
     policy = json.loads((ROOT / 'config/release.json').read_text())['kernel']
+    series = release_series(ROOT, policy)
     release = subprocess.run(['git', '-C', str(source), 'merge-base', '--is-ancestor',
-                              policy['base_commit'], commit], capture_output=True)
+                              series['base_commit'], commit], capture_output=True)
     if release.returncode == 0 and policy.get('uapi_sha256'):
         return policy['uapi_sha256']
     current = subprocess.run(['git', '-C', str(source), 'merge-base', '--is-ancestor',
@@ -58,29 +61,30 @@ def run(args, cwd=None):
     subprocess.run([str(x) for x in args], cwd=cwd, check=True)
 
 
-def build(kernel, source, kernel_build, output, cc, sysroot, macros, loop):
+def export_uapi(source, kernel_build, commit, output):
+    compiler_source = runtime.kernel_compiler_source(kernel_build, source, commit)
+    run(['make', '-C', compiler_source, 'O=' + str(kernel_build), 'ARCH=arm64',
+         'headers_install', 'INSTALL_HDR_PATH=' + str(output)])
+    expected = expected_uapi_digest(source, commit)
+    if runtime.tree_digest(runtime.tree_files(output / 'include')) != expected:
+        raise ValueError('Runtime UAPI differs from the reviewed public interfaces')
+    return expected
+
+
+def build(kernel, source, kernel_build, output, cc, sysroot, firmware_root=None):
     record = json.loads((kernel / 'manifest.json').read_text())
     release, commit = record['kernel_release'], record['source_commit']
     identity = runtime.kernel_identity(kernel_build, source, commit, release)
-    compiler_source = runtime.kernel_compiler_source(kernel_build, source, commit)
     runtime.repository(ROOT / 'upstream/debian-piano-current', runtime.PUBLIC_COMMIT)
-    runtime.repository(macros, runtime.MACROS_COMMIT)
-    runtime.repository(loop, runtime.LOOP_COMMIT)
     if output.exists() or not output.resolve().is_relative_to(ROOT / 'build'):
         raise ValueError('Use a fresh project build output')
     compiler = shutil.which(cc)
-    topology_compiler = shutil.which('alsatplg')
-    if not compiler or not topology_compiler or not shutil.which('m4'):
-        raise ValueError('Install the explicit compiler, alsatplg and m4 first')
+    if not compiler:
+        raise ValueError('Install and select the runtime helper compiler')
     output.mkdir(parents=True)
     public = ROOT / 'upstream/debian-piano-current'
     uapi = output / 'uapi'
-    run(['make', '-C', compiler_source, 'O=' + str(kernel_build), 'ARCH=arm64',
-         'headers_install', 'INSTALL_HDR_PATH=' + str(uapi)])
-    rows = runtime.tree_files(uapi / 'include')
-    uapi_digest = expected_uapi_digest(source, commit)
-    if runtime.tree_digest(rows) != uapi_digest:
-        raise ValueError('Runtime UAPI differs from the reviewed public interfaces')
+    uapi_digest = export_uapi(source, kernel_build, commit, uapi)
     flags = [compiler, '-O2', '-Wall', '-Wextra', '-Werror']
     if 'clang' in Path(compiler).name:
         flags += ['--target=aarch64-linux-gnu']
@@ -95,7 +99,9 @@ def build(kernel, source, kernel_build, output, cc, sysroot, macros, loop):
     emulator = None if native else shutil.which('qemu-aarch64-static') or shutil.which('qemu-aarch64')
     if not native and not emulator:
         raise ValueError('AArch64 helper checks need qemu-aarch64 on this host')
-    pen_files, pen_record = runtime.build_pen_core(output, flags, sysroot, emulator=emulator)
+    pen_files, pen_record = runtime.build_pen_core(
+        output, flags, sysroot, emulator=emulator, kernel=identity,
+        firmware_root=firmware_root)
     files.update(pen_files)
     camera_files, camera_record = runtime.build_camera(
         output, flags, pen_record['cxx_command'], uapi, sysroot, emulator=emulator)
@@ -120,65 +126,22 @@ def build(kernel, source, kernel_build, output, cc, sysroot, macros, loop):
             item.update(touch_record)
         files[destination] = item
     fingerprint_files, fingerprint = build_piano_fingerprint.build(
-        output, flags, emulator=emulator)
+        output, flags, uapi, emulator=emulator)
     fingerprint_binary = output / fingerprint_files[
         'usr/local/sbin/piano-fingerprint-ctl']['file']
     fingerprint_files['usr/local/sbin/piano-fingerprint-ctl'].update(
         runtime.verify_elf(fingerprint_binary), help_no_device_access=True)
     files.update(fingerprint_files)
-    runtime.build_topology(public, macros, output / 'firmware')
-    topology = output / 'firmware/qcom/sm8750/Xiaomi Pad 8 Pro-tplg.bin'
-    if runtime.sha(topology) != runtime.TOPOLOGY_PIN:
-        raise ValueError('Topology bytes differ from the reviewed source build')
-    run([topology_compiler, '-d', topology, '-o', output / 'topology-decoded.conf'])
-    files['usr/lib/firmware/qcom/sm8750/Xiaomi Pad 8 Pro-tplg.bin'] = {
-        'file': str(topology.relative_to(output)), 'bytes': topology.stat().st_size,
-        'sha256': runtime.sha(topology), 'mode': 0o644}
-    module_source = output / 'v4l2loopback'
-    module_source.mkdir()
-    for name in subprocess.check_output(['git', '-C', str(loop), 'ls-files'], text=True).splitlines():
-        target = module_source / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(loop / name, target)
-    for patch in runtime.source_patches(runtime.LOOPBACK_PATCH_SERIES):
-        run(['patch', '--batch', '--forward', '--fuzz=0', '-p1',
-             '--directory', module_source, '--input', patch])
-    module_inputs = {
-        str(path.relative_to(ROOT)): runtime.sha(path)
-        for path in (Path(prepare_kernel_llvm.__file__), prepare_kernel_llvm.POLICY)
-    }
-    module_env = prepare_kernel_llvm.environment()
-    module_compiler = shutil.which('clang', path=module_env['PATH'])
-    module_toolchain = {
-        'compiler': module_compiler, 'compiler_sha256': runtime.sha(Path(module_compiler)),
-        'version': subprocess.check_output([module_compiler, '--version'],
-                                           env=module_env, text=True).splitlines()[0],
-    }
-    subprocess.run(['make', '-C', str(kernel_build), 'M=' + str(module_source),
-                    'ARCH=arm64', 'LLVM=1', 'LOCALVERSION=', 'modules'],
-                   env=module_env, check=True)
-    module = module_source / 'v4l2loopback.ko'
-    item = modinfo(module)
-    if not item['vermagic'].startswith(release + ' '):
-        raise ValueError('External module ABI differs from the selected kernel')
-    files['usr/lib/modules/' + release + '/updates/v4l2loopback.ko'] = {
-        'file': str(module.relative_to(output)), 'bytes': module.stat().st_size,
-        'sha256': runtime.sha(module), 'mode': 0o644, 'vermagic': item['vermagic'],
-        'source_commit': runtime.LOOP_COMMIT}
     if runtime.kernel_identity(kernel_build, source, commit, release) != identity:
         raise ValueError('Kernel source/ABI changed during runtime helper build')
-    if any(runtime.sha(ROOT / name) != digest for name, digest in module_inputs.items()):
-        raise ValueError('External module toolchain inputs changed during compilation')
     result = {'status': 'RUNTIME_COMPILED_NOT_DEVICE_TESTED', 'kernel': identity,
-        'public_commit': runtime.PUBLIC_COMMIT, 'runtime_files': files, 'pen_core': pen_record, 'camera': camera_record,
+        'public_commit': runtime.PUBLIC_COMMIT, 'runtime_files': files, 'pen_core': pen_record,
         'producer': {'file': 'tools/build_release_helpers.py', 'sha256': runtime.sha(Path(__file__))},
-        'fingerprint': fingerprint,
-        'module_toolchain_inputs': module_inputs, 'module_toolchain': module_toolchain,
-        'uapi_sha256': uapi_digest, 'uapi_source_commit': commit, 'macros_commit': runtime.MACROS_COMMIT,
-        'v4l2_commit': runtime.LOOP_COMMIT, 'hardware_verified': False,
+        'fingerprint': fingerprint, 'camera': camera_record,
+        'uapi_sha256': uapi_digest, 'uapi_source_commit': commit,
+        'hardware_verified': False,
         'toolchain': {'compiler': compiler, 'compiler_sha256': runtime.sha(Path(compiler)),
-            'version': subprocess.check_output([compiler, '--version'], text=True).splitlines()[0],
-            'alsatplg_sha256': runtime.sha(Path(topology_compiler))}}
+            'version': subprocess.check_output([compiler, '--version'], text=True).splitlines()[0]}}
     (output / 'manifest.json').write_text(json.dumps(result, indent=2) + '\n')
     return result
 
@@ -189,12 +152,12 @@ def main():
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--cc', default='clang' if platform.machine() in ('aarch64', 'arm64') else 'aarch64-linux-gnu-gcc')
     parser.add_argument('--sysroot', type=Path)
-    parser.add_argument('--macros', type=Path, default=ROOT / 'upstream/audioreach-topology')
-    parser.add_argument('--v4l2-source', type=Path, default=ROOT / 'upstream/v4l2loopback')
+    parser.add_argument('--firmware-root', type=Path,
+                        help='Target root containing pen firmware calibration; defaults to --sysroot')
     args = parser.parse_args()
     result = build(args.kernel.resolve(), args.source.resolve(), args.kernel_build.resolve(),
                    args.output.resolve(), args.cc, args.sysroot.resolve() if args.sysroot else None,
-                   args.macros.resolve(), args.v4l2_source.resolve())
+                   firmware_root=args.firmware_root.resolve() if args.firmware_root else None)
     print(json.dumps({'status': result['status'], 'kernel_release': result['kernel']['release']}))
 
 

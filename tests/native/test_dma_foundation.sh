@@ -5,6 +5,7 @@ set -euo pipefail
 case "$(uname -m)" in aarch64|arm64) sun_bind=AArch64 ;; *) sun_bind=X64 ;; esac
 sun_dma_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$sun_dma_root"
+. tests/native/core-includes.sh
 sun_dma_includes=(
   -I upstream/Mu-Silicium/Mu_Basecore/MdePkg/Include
   -I upstream/Mu-Silicium/Mu_Basecore/MdePkg/Include/$sun_bind
@@ -12,10 +13,9 @@ sun_dma_includes=(
   -I upstream/Mu-Silicium/Silicon/Qualcomm/QcomPkg/Include
   -I uefi/components/ext4
 )
-for sun_dma_test in dma smmu_snapshot io_pgtable owned_smmu ufs_dma_layout ufs_readonly_dma ufs_probe gpt readonly_block; do
+for sun_dma_test in dma smmu_snapshot io_pgtable owned_smmu ufs_dma_layout ufs_readonly_dma ufs_probe gpt block_io; do
   cc -std=gnu11 -fshort-wchar -g -fsanitize=address,undefined -fno-pie -no-pie \
     -ffunction-sections -fdata-sections "${sun_dma_includes[@]}" \
     "tests/native/test_${sun_dma_test}.c" -Wl,--gc-sections -o "build/test-${sun_dma_test}-asan"
   "build/test-${sun_dma_test}-asan"
 done
-.venv/bin/python tests/unit/test_dma_log.py

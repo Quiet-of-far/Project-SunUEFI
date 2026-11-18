@@ -26,11 +26,13 @@ Linux 基线为上游稳定版 `v7.3.3`，提交
 新内核的模块、`v4l2loopback` 相机模块和 initramfs，不能只替换 `Image`。
 
 启动参数只来自启动镜像，不编进内核。`config/release.json` 的
-`kernel.command_line` 是发布参数来源，打包时写入 UKI 的 `.cmdline`。
+`kernel.command_line` 是初装发布参数来源，默认写入 BLS 启动项，
+选择 UKI 时写入其 `.cmdline`。
 内核使用 `CONFIG_CMDLINE=""`，关闭 `CONFIG_CMDLINE_FORCE`，不保留内建后备。
-打包检查根分区、`rdinit=/pianoinit` 和参数长度，并读回校验 UKI 的各段。
+打包检查根分区、`rdinit=/pianoinit` 和参数长度，并读回校验启动文件；
+安装后的原生内核包使用发行版 initramfs 和标准 `root=` 参数。
 
-当前 DTB 包含启用的 `simple-framebuffer`，UKI 通过标准 Linux EFI stub 启动。
+当前 DTB 包含启用的 `simple-framebuffer`，内核通过标准 Linux EFI stub 启动。
 `console=tty0` 在 framebuffer 控制台注册后才有输出；
 `console=ttyGS0` 也需要 USB gadget 建立后才可用，不能作为最早期串口。
 屏幕停留在固件交接页不等于内核没有运行，定位需结合 pstore、initramfs
@@ -126,6 +128,11 @@ Gunyah 虚拟机运行仍需实机验证，不能以设备节点出现代替。
 对应的旧显示／相机节点。Demura 的零地址、零长度占位项禁用，有效的内存
 预留保持不变。
 
+折叠树中 `bias-disable = <0>` 转成标准空标志，保留 pinconf 的零参数语义。
+无兼容串的旧 `cnss_pci0` 占位节点去掉空 `reg`，保留内存和 IOMMU 引用；
+有效 PCI 地址不变。这两类格式错误会阻断 schema 解码，不能靠验证器退出码
+判断通过；还需检查诊断输出中的绑定错误。
+
 原厂 `sdam@7000/sm1510_present@5d` 在一字节内声明了偏移 5、长度 5 的
 无效位范围。主线没有该厂商标志的消费者，因此保留完整原始字节，去掉无效的
 位切片，不猜测其正确位宽。这样 SDAM 提供者及同区的 OCP 记录可以正常注册。
@@ -142,10 +149,25 @@ SoC 温区使用锁定内核 `sm8750.dtsi` 中的完整 `thermal-zones` 定义�
 提取为 include，由 `piano-tsens.dtso` 合入根节点，保留 47 个传感器映射、
 温度阈值及八个 GPU 降温映射；GPU 引用连接到板级主线节点 `gpu_ml`，并补齐
 `#cooling-cells`。不将 Android 的 `/soc/thermal-zones` 厂商策略当作主线温区，
-也不另抄一份阈值。已有 `piano-skin` 充电温区保留。内核 thermal 和 hwmon
+CPU 降频补齐原厂九个温区到 `cpu0`／`cpu6` 的 cooling map：
+从同机 Android 的 sysfs 核对为 95°C passive、8°C 回差，分别对应
+policy0 的 CPU 0–5 和 policy6 的 CPU 6–7。其余七个单核温区在原厂使用
+高温停核保护，不属于 95°C 降频策略；四个 `cpuss` 温区原厂没有冷却映射。
+Linux 保留 SoC 原有的 hot／critical 阈值，没有复制厂商停核策略。
+已有 `piano-skin` 充电温区保留。内核 thermal 和 hwmon
 接口直接提供读数，不需要用户空间采集服务；SoC 温度与电池 JEITA 温度分别处理。
 实机启动和深度挂起恢复后，47 路 SoC 温度均可读取，八路 GPU 温区均绑定
 `devfreq-3d00000.gpu` 降温设备。
+
+### 游戏手柄
+
+[`piano-gamepad.config`](../../../linux/configs/piano-gamepad.config) 为四个
+系统启用主线 `xpad`、`hid-microsoft`、`hid-nintendo`、`hid-playstation`
+和 `hid-sony`，同时开启 joystick 设备接口、振动及驱动支持的指示灯功能。
+USB Xbox／XInput 设备使用 `xpad`；蓝牙 HID 通过 BlueZ、UHID／HIDP 和
+对应 HID 驱动进入 evdev，不使用 USB xpad。设备连接成功但 Steam 没有输入时，
+应分别检查 HID 绑定、输入事件和 Steam 权限，不能把蓝牙配对当成驱动正常。
+这些选项不包含树外 xpadneo，也不保证所有第三方兼容模式使用相同协议。
 
 磁盘启动统一使用 `linux/userspace/disk-bootstrap`，支持发布镜像的 LABEL 和
 开发镜像的 PARTUUID。ext4 先正常回放日志，再转为读写；救援环境包含磁吸键盘
@@ -231,7 +253,7 @@ ADSP 崩溃恢复还会同步注销 ASoC 声卡；音频进程保留已移除声
 UCSI 连接状态，不能只看电池的 `Charging` / `Discharging`。使用中的现象和
 处理办法见[电源和睡眠](../../user/known-issues.md#电源和睡眠)。
 
-0113 在现有 `piano-mca-usb` 电源设备上提供标准
+0137 在现有 `piano-mca-usb` 电源设备上提供标准
 `charge_control_end_threshold` 属性。范围为 50–100，默认 100 表示沿用正常
 充电策略；设置为 80 时，任一电池计量器达到 80% 后停止电池充电，两个计量器
 都降至 75% 或以下才恢复。恢复回差固定为 5 个百分点，没有新增独立恢复阈值。
@@ -473,6 +495,10 @@ MCA 的 `charge_control_limit` 以微安设置两颗电芯的合计充电上限�
 FCC 列，电荷泵分流也使用该限制；这条皮温策略不额外降低系统输入 ICL。
 JEITA、电芯电压及硬件保护继续独立生效。
 
+普通充电在实测最高电芯温度为 48–54°C 时，按原厂标定给 PMIC 浮充电压
+加 30 mV，暖区写入值为 4090 mV。JEITA 的停充和恢复仍使用原来的
+4060 mV 目标，不随硬件补偿上调；FFC 使用独立的补偿规则。
+
 皮温模型读取两颗 BQ27Z561 的原始温度寄存器 `0x1e`，以及 quiet、
 charger1、Wi-Fi、CPU 四路板温。原有电量计 `TEMP` 的 `0x06` 用途保持。
 原厂冷区取两芯原温的较低值，暖区取较高值；模型保留权重
@@ -486,6 +512,23 @@ charger1、Wi-Fi、CPU 四路板温。原有电量计 `TEMP` 的 `0x06` 用途�
 后再按条件恢复。温区拒绝报告超过四秒的旧样本。板级 ADC 使用原有热敏
 输入状态，PMIH010x GPIO 匹配同机原厂的标准 18 引脚布局；不改写充电
 模式寄存器。运行时充电状态机留在内核，关机充电沿用原厂启动链。
+
+### USB-C 接口过热保护
+
+MCA 通过 IIO 读取原厂两路接口热敏电阻，取较热一路。接口达到 65°C、
+接口达到 60°C 且板温不高于 50°C、或接口达到 35°C 且温升达到 4°C/s，
+均触发保护。板温复用同机原厂 `VIRTUAL-SENSOR` 的五路模型；板温无法读取
+时使用 60°C 阈值。任一路接口温度读不到时也执行隔离，不用旧温度继续充电。
+
+驱动先请求停止电荷泵、PMIC 充电和 USB 供电，再通过 PM8550 GPIO9 隔离
+接口电源。通信失败也尝试隔离，电压读回无法确认时重试。MCA USB 电源通过
+标准 `health` 报告过热。
+UCSI `present` 和 ADSP 连接状态用于确认拔线；总线电压归零不代表线已拔下。
+拔线、退出 OTG 且接口低于 55°C、温升低于 4°C/s 后才解除过热保护；
+恢复期间接线或 GPIO 写入失败都会保留停充。
+
+插线或无法确认拔线时可以熄屏，但不进入系统挂起，以便继续测温。
+确认拔线后，挂起前隔离接口电源，唤醒后先重新测温，再决定是否恢复供电。
 
 ### 输入恢复与充电停止
 
@@ -742,6 +785,19 @@ SOC 按各组满充容量加权；充放电状态由合计净电流和满充标�
 内部电量计不再单独注册为系统 Battery，因此 UPower 和 GNOME 只显示一个
 完整电池组，不需要桌面补丁或过滤规则。
 
+两颗电量计的 `current_now` 读取 `0x0c` 的测量电流，`current_avg` 读取
+`0x14` 的滤波电流，均以有符号微安报告。系统电池分别汇总两组对应的读数；
+充放电状态和 MCA 策略继续用滤波电流，停充、回充及快充阈值不变。
+
+[TI 技术手册](https://www.ti.com/lit/ug/sluuc54c/sluuc54c.pdf#page=80) §12.1.15
+规定标准 BQ27Z561 `AveragePower()` 读取 `0x22/0x23`，返回有符号毫瓦，
+充电为正、放电为负。Piano 的 HyperOS 4 电量计驱动读取另外两个寄存器，
+将 `0x7b` 报为功率偏差（`power_deviation`），`0x89` 报为 `action_power`。
+偏差不是平均功率，`action_power` 的单位与平均窗口也没有核实，
+不能套用标准命令的换算。
+在平板上，两颗电量计的 `power_avg` 均返回 `ENODATA`，各自的电压和电流
+仍能读取；充电调节不依赖这个功率字段。
+
 FFC 使用前还需要两颗电量计通过电池认证，不能把充电器 MiPPS 认证当成
 电池认证。BQ27Z561 驱动使用原厂 32 字节随机挑战及 HMAC-SHA256 邮箱，
 结果通过标准只读 `authentic` 属性提供，电池组只有在两组都通过时才报告
@@ -766,8 +822,8 @@ FFC 使用前还需要两颗电量计通过电池认证，不能把充电器 MiP
 
 ### MiPPS 认证与连接恢复验证
 
-参数对照测试每次只改变一个参数，并保持 UKI、模块与 root 中的配置匹配。
-产品使用同一个 UKI 入口，SimpleInit 无操作五秒后启动；需要停留菜单时用
+参数对照测试每次只改变一个参数，并保持启动文件、模块与 root 中的配置匹配。
+产品共用初装启动镜像，SimpleInit 无操作五秒后启动；需要停留菜单时用
 按键或触摸取消。启动失败可从前面的安卓／UEFI 选择器进入 Android，
 再更新启动镜像，不修改原厂系统分区。
 

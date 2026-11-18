@@ -1,14 +1,124 @@
 # Piano 触控笔协议与原厂算法
 
-默认 120 Hz。Focus Pen Pro 支持定位、压感绘画、144 Hz 笔输入、轻捏、震动和磁吸连接恢复；普通 Focus Pen 的刷新率范围见下文。掌压按接触面积识别并与笔同组交给 libinput 仲裁，阈值仍需用真实手掌数据调整，见[笔目录说明](../../../linux/userspace/pen/README.md)；轻捏、双击和笔身滑动的格式与 Linux 输出见[笔身手势](#笔身手势)。
+默认 120 Hz。Focus Pen Pro 已在产品内核上完成定位与压感绘画，坐标和压力直接通过物理 SPI evdev 设备交给桌面。GNOME 原生数位板页已识别该设备。手势、掌压和普通笔的覆盖范围见下节；刷新率的使用说明见[已知问题](../../user/known-issues.md#触控笔)。掌压按接触面积识别，并与笔同组交给 libinput 仲裁，见[笔目录说明](../../../linux/userspace/pen/README.md)。
 
 下文保留移植过程的协议记录。原厂依据来自同版本 `OS3.0.309.0.WPYCNXM` ROM 的触控 HAL、公开驱动和操作采集。
+
+## 内核输入与许可边界
+
+`hid-xiaomi` 将两个型号的 15 字节 Report5 首个小端 16 位字上报为标准
+`ABS_PRESSURE`，范围分别为 M80p 的 0..8191 和 P81c 的 0..16383；Report2 的
+两个笔按钮也有标准事件。其余压力字、Report6 姿态和原始矩阵中的 pressure
+不补作笔输入。压力节点没有 X/Y 或 `BTN_TOOL_PEN`，因此不冒充独立数位板；
+原始 hidraw 保持不变。
+
+`nt36532e` 新增独立整数 C 实现：校验 type29 的两层校验和、四组 480 点矩阵
+和手指 quarter 边界。每个扫描组独立减去本组中位数，选择局部五电极正信号
+总量最大的组并在同一组内求质心，不将不同扫描组逐电极最大值拼成虚构轴。
+再用外部位置映射、Tip/Ring 差值曲线和倾角校正生成坐标。它不使用现有 C++ 解算器的
+候选扫描线混合、浮点 Kalman 和 follower 滤波，边缘、悬停距离、掌压干扰与
+倾角精度必须用原始采集和笔尖位置对照，不能把编译成功写成原厂等价。
+
+校准通过标准 `request_firmware_direct()` 读取 `novatek/piano-boe-pen.ini`
+或 `novatek/piano-csot-pen.ini`，按控制器 LCD ID 选择，接受仓库现有的数字
+`format_version=1`。文件位于发行版标准固件目录 `/lib/firmware/novatek/`
+（合并 `/usr` 的系统为 `/usr/lib/firmware/novatek/`），不把映射表或模型常数
+塞进 GPL 驱动。BSP 从已有数字校准建立相对符号链接，表数据只维护一份。
+文件缺失或校验失败时手指输入继续工作，不自动启动用户态笔来掩盖失败。
+
+离线重放已有 120 Hz 原始录制：1423 个 type29 中接收 1411 个，拒绝 10 个
+校验损坏和 2 个 quarter5；独立整数实现得到 1146 帧坐标与倾角，旧 C++ 核心
+得到 1177 帧。按最新不晚于屏幕帧、100 ms 内的 BLE Report5 计算，814 个
+非零压感帧均有新坐标。两个核心共同有效的接触帧，位置差中位数约 0.22 mm、
+99 分位约 0.55 mm；这些是软件间差异，不是对原厂或笔尖真值的精度测量。
+
+弱悬停仍有 39 个旧核心有效帧被拒绝，均没有新鲜 BLE 压力，另有 8 帧仅新核心
+有效。共同有效悬停位置差 99 分位约 9.47 mm、最大约 18.14 mm；倾角轴差
+99 分位约 18°。
+该录制只有一支 Pro，覆盖到一个轴边缘，没有完整四边、手掌或 144 Hz 数据。
+这份重放不能证明悬停稳定性、倾角与边缘体验已达到旧实现，也不是新实机结果。
+
+产品内核另有 Focus Pen Pro 的实机结果：GTK 画布记录 27 笔、1030 个事件，
+维护者确认位置与线宽正常；120 秒 evdev 采集记录 7268 次同步，压力为
+0..16383，两个倾角轴均有变化。这确认了新路径的书写、压力和倾角事件输出，
+没有覆盖倾角精度、弱悬停、完整四边或手掌干扰。
+
+发布构建器核对匹配内核的笔源码、配置、notifier 导出符号及目标根目录中
+两份校准，缺少驱动或校准时构建报错。`piano-device-config` 安装
+`piano-touch.service`、BlueZ 初始化程序和依赖。udev 在 SPI 驱动绑定后启动
+服务，不等待 THP 的私有节点。该进程不写 procfs、不读 hidraw/THP、不创建
+uinput，笔尚未 BLE 连接时也会继续等待。四个产品目标使用同一条输入路径。
+编译环境由 `--sysroot` 指定，固件检查默认使用它，也可用 `--firmware-root`
+单独指定目标根目录。SteamOS、Nyarch 从 `piano-device-config` 安装校准和链接，
+并将各自的 rootfs 传给构建器，不要求 Debian 编译容器安装平板固件。
+最终 staging 仍检查安装目的地，不能用编译环境中的文件代替目标固件。
+
+内核 `input_handler` 只连接 `hid-xiaomi` 的真实 BLE 压力设备，内部 notifier
+保留每个实际样本的 BOOTTIME 时刻，避免 evdev 对不变压力的去重丢失新鲜度。
+融合只取不晚于屏幕帧且不超过 100 ms 的压力；断连、挂起、固件重载、
+磁吸和帧超时释放工具与按钮。100 ms 是防止卡住接触的策略，不是原厂参数。
+释放接触或压力失效时同步清零 `ABS_PRESSURE`；同一次感应范围内缺少 Ring
+样本时保留上一倾角，不把缺测当作直立，工具离开范围时清除倾角状态。
+合成输入属于 SPI 触控设备，不依赖 uinput 或用户空间读取原始 FIFO。M80p
+和 P81c 按实际连接型号切换范围；同时存在两个 BLE 发送者时停止融合与扫描，
+因为 type29 中哪一字段能对应 BLE 身份尚未建立，不能把第一支笔的压力套给
+另一支笔的位置。
+
+扫描跟随现有标准 `SW_PEN_INSERTED`，不依赖私有充电节点：磁吸时停止，取下
+后恢复已请求型号；面板及系统休眠停止扫描，固件恢复后按当前状态重放。
+停止扫描失败时保留停止请求并每秒重试，确认停止前不配置新的笔型号。
+磁吸 handler 初始化失败时清理该 handler 并排空工作项，保留手指与旧用户态
+笔诊断接口，不使整个触屏探测失败。发布镜像只使用内核笔输入；原始数据接口
+和用户态解码保留用于显式诊断和对照。
+
+| 能力 | 旧用户态路径 | 当前内核路径 | 替代前还需确认 |
+| --- | --- | --- | --- |
+| 位置、压力与倾角 | THP／hidraw 解码后写 uinput；Pro 120 Hz 绘画有实机结果 | 物理 SPI input；HID 压力在内核融合，Pro 120 Hz 压感绘画与倾角事件已有实机记录 | 普通笔、四边、弱悬停及倾角精度 |
+| 按钮与轻捏 | 用户态合并按钮和轻捏状态 | HID 按钮及轻捏状态合入同一工具，超时和释放清压力 | 两种笔的按下、抬起、长按和断连 |
+| 磁吸、休眠与固件恢复 | 用户态控制扫描并恢复 | 标准磁吸开关驱动内核扫描，未确认停止继续重试 | 实际挂起／恢复、反复磁吸及固件重载 |
+| 手掌与 144 Hz | 掌压阈值需采集；144 Hz 缺笔帧 | 笔在范围内抑制手指，144 Hz 的缺帧根因未消除 | 完整掌压、双笔身份关联与 144 Hz |
+
+更换 rootfs 后仍需要标准固件目录中的匹配校准、BlueZ 和 libinput。
+BlueZ 的厂商 GATT 初始化尚未由通用发行版组件自动提供，因此“只装发行版
+标准包即可使用全部笔功能”的目标还没有完成，不能只删除初始化进程来宣称达标。
+
+### 桌面原生数位板设置
+
+笔以 `BUS_SPI`、`0603:6532` 的物理 evdev 设备交给 libinput，不修改总线身份。
+libwacom 2.20 尚未识别 SPI；[共享补丁](../../../patches/libwacom/2.20/series.json)
+补入总线解析、数据库与工具支持，并按两个内核设备名匹配内屏。
+设备描述使用内核报告的 239×163 mm，声明压感、倾角和两个笔按钮，不声明反转橡皮擦。
+带倾角且没有橡皮擦的通用笔类型由同一份数据库维护，不在 GNOME 或 KDE 中加入型号判断。
+
+GNOME 原生数位板页已经在物理设备上显示 `Xiaomi Pad 8 Pro`，提供显示映射与校准。
+GNOME 的压力曲线和按钮页还需要笔进入感应范围后检查。SteamOS 完整镜像上的
+KDE 数位板页已显示内屏映射、两个笔身按钮和压力曲线；KWin 将物理节点识别为
+非虚拟 tablet-tool，压力曲线修改与恢复均可读回。板面没有独立快捷键，
+因此不创建 tablet-pad。按钮动作与曲线对实际书写的影响还缺物理操作检查。
+`./build.sh libwacom` 生成标准 Debian／pacman 包，四个产品的 rootfs 构建均安装该包。
+SteamOS 的 2.18 基础包升级为同一份 2.20 源码，保留 `libwacom.so.9`，不另存旧版本补丁。
+这些修改仍是下游补丁，尚未进入 libwacom 上游。
+
+现有 [`piano-pen-decoder.cpp`](../../../linux/userspace/pen/piano-pen-decoder.cpp)
+和其[固定上游](https://github.com/ianchb/xiaomi-sheng-thp/tree/34046210932d654a4c0df0121ecc31c008f8148c)
+仅授予 Apache-2.0。Linux `LICENSES/dual/Apache-2.0` 明确要求另有 GPLv2 兼容
+授权；不能直接翻译成 C 或更换 SPDX 并入内核。上述质心/插值是独立实现，
+协议事实和数学方法可复用，原开源核心及其许可保留。
+
+P81c 的 FE11/FE12 初始化仍由 BlueZ 控制服务完成。HID Report Map 没有 Output
+或 Feature；`drivers/hid/uhid.c::uhid_hid_set_report()` 仅把 HID 请求交回
+用户空间，并没有访问任意 GATT characteristic 的接口。BlueZ 的
+[`profiles/input/hog.c`](https://github.com/bluez/bluez/blob/master/profiles/input/hog.c)
+通过用户空间 GATT client 创建 UHID。当前内核没有供 `hid-xiaomi` 共用这条
+ATT 连接的通用 GATT client；因此不能删除 `pen-bluetooth` 并假装无线时序、
+磁吸通知、双击开关和振动初始化已经由驱动完成。144 Hz 无笔帧的原因也未
+由这份输入迁移修复。
 
 ## 普通 Focus Pen（M80p）
 
 普通笔使用蓝牙 `0022:4d80`，扫描模式 1，压力范围 0..8191。
-普通笔已通过悬停、定位和线宽随压力变化验证，刷新率限制见
-[已知问题](../../user/known-issues.md#触控笔)。型号切换、校准来源和按键路由见
+普通笔在旧用户态路径通过悬停、定位和线宽随压力变化验证，新内核尚缺该型号的
+实机记录。使用说明见[已知问题](../../user/known-issues.md#触控笔)。型号切换、校准来源和按键路由见
 [普通 Focus Pen](../../../linux/userspace/pen/README.md#普通-focus-pen)。
 
 ## 屏幕数据与 BLE 分开处理
@@ -103,9 +213,11 @@ v2方法 `+0x30=0x26dec` 是另一条路径：HAL `0x26804..0x26834` 以cmd2/arg
 | IRQ | 78 | 下降沿，读取并清除中断 |
 | Hall3／Hall4 | 200／196 | 低有效 OR，双沿中断与唤醒 |
 
-芯片命令 `0x0100` 的 `0x80000`／`0x40000` 控制发射启停；中断来自 `0x0108`，写入 `0x010c` 清除。电量来自 `0x01d0`，低七位为百分比、高位为充满；蓝牙地址来自 `0x01de..0x01e3`，字节序与原厂上报一致。出现 FOD、EPT、通信超时或移除时停止发射。按照原厂行为，明确充满或连续 180 秒报告 100% 后关闭升压。驱动不下载或更新芯片 MTP 固件。
+芯片命令 `0x0100` 的 `0x80000`／`0x40000` 控制发射启停；中断来自 `0x0108`，写入 `0x010c` 清除。电量来自 `0x01d0`，低七位为百分比、高位为充满；蓝牙地址来自 `0x01de..0x01e3`，字节序与原厂上报一致。驱动不下载或更新芯片 MTP 固件。
 
-设备自动绑定驱动，标准节点为 `/sys/class/power_supply/sc96231-pen`，作用域为外设；没有有效报告时返回未知或 `ENODATA`。跨系统切换会自动恢复配对、GATT 服务和笔初始化。首次点击延迟与睡眠期间取放已解决；低电量充电速度不在本文提供量化数据。
+磁吸开关只表示笔已就位。发射器启动后等 `PING` 最多 20 秒，收到后等接收端确认 `GET_RX` 最多 100 秒；只有确认后才报告正在充电。异物检测（FOD）、停止传输（EPT）、通信超时或取下笔都会停止发射。明确充满或持续 180 秒报告 100% 后也会停止。升压电源未成功关闭时，保持发射器禁用并重试关闭，再允许开始下一轮。
+
+设备自动绑定驱动，标准节点为 `/sys/class/power_supply/sc96231-pen`，作用域为外设；没有有效报告时返回未知或 `ENODATA`。SteamOS 实机从识别到接收端、确认传输到报告 `Full`，升压电源的使用计数随即归零。要确认低电量下的实际充电，用笔把电量降下来再吸回，记录电量上升；仅看到充电状态不能替代这个检查。
 
 原厂 `MiuiBleOobHelperService` 在磁吸链路给出笔地址后主动连接，未配对时调用 `createBond`。Linux 伴随程序使用相同的物理识别结果，通过 BlueZ 接口处理配对与控制服务。加密失败由 `org.bluez.Device1.Disconnected` 的 `org.bluez.Reason.Authentication` 判断，只移除该笔失效的配对并重新配对；不会清空其他设备。配对代理只服务测试磁吸识别的笔，不注册为系统默认代理。
 
@@ -178,7 +290,7 @@ CPU前缀仍不能交给完整 `parse_data_package`：该函数还读取主触�
 
 流程是 `52 → 00/01/02/03 → 04/30/31/32 → 04/30/31/32 → 33 → 51 → 5F/5A/5C/61`。参数30含本机适配器地址和当次笔ID，第二轮的时序槽值由3变1；频率31使用原厂默认表，电压32为`2800`；时间戳33是Unix秒数，与输入采集的BOOTTIME时基不同。不能静态重放另一台机器的适配器地址或旧的笔ID。
 
-[`piano-pen-bluetooth.py`](../../../linux/userspace/pen/piano-pen-bluetooth.py) 已实现该序列，每步等待回应，并按真正的 `SW_PEN_INSERTED` 发送Hall状态。无线参数和解算校准是两类数据；本机无线参数放在BSP的 `p81c-radio.json`，BOE／CSOT位置校准仍来自原厂ini。程序通过统一runtime安装，参数通过BSP和硬件配置组装安装，不新增服务或第二个THP流读取者。
+[`pen-control.py`](../../../linux/bsp/common/usr/lib/piano/pen-control.py) 实现该序列，每步等待回应，并按真实的 `SW_PEN_INSERTED` 发送磁吸状态。无线参数 `p81c-radio.json` 和程序一起打入设备配置包，BOE／CSOT 位置校准仍来自原厂 ini。服务不读取 THP。
 
 原厂还有一条独立的地址获取通路。固定设备模块 `sc96231_tx.ko` 的 `sc96231_get_pen_mac` 从 `0x200001de` 读取两字节、从 `0x200001e0` 读取四字节；MCA 的 `mca_wireless_rev_pen_data_handle_work` 调用该函数后发送 uevent。原厂蓝牙扩展的 `oobhelper/f.java::onUEvent` 处理 `POWER_SUPPLY_PEN_MAC`，获取指定地址的 `BluetoothDevice`，按绑定状态进入连接或配对流程。这解释了原厂并非仅依赖用户打开扫描列表。该静态调用链不证明充电芯片主动唤醒 BLE 的电气时序，不能把上述地址读取直接当作唤醒命令。
 
@@ -266,14 +378,16 @@ Linux之前显示144Hz、hand180、pen240。两边笔扫描率相同；这一次
 | --- | --- | --- |
 | 上滑 | 笔键盘节点的 `KEY_PAGEUP` | 内核 `hid-xiaomi` |
 | 下滑 | 笔键盘节点的 `KEY_PAGEDOWN` | 内核 `hid-xiaomi` |
-| 双击 | tablet-tool 节点的 `BTN_STYLUS2` 按下、抬起，仅在笔处于感应范围时 | `piano-pen-owner.c` |
-| 轻捏 | 短按是笔尖位置的一次点击，按住 600 ms 以上是 `BTN_STYLUS`，仅在感应范围时 | `piano-pen-owner.c` |
+| 双击 | tablet-tool 节点的 `BTN_STYLUS2` 按下、抬起，仅在笔处于感应范围时 | 内核 `hid-xiaomi` 与 `nt36532e` |
+| 轻捏 | 短按是笔尖位置的一次点击，按住 600 ms 以上是 `BTN_STYLUS`，仅在感应范围时 | 内核 `hid-xiaomi` 与 `nt36532e` |
 
-内核补丁 [`0029-hid-xiaomi-p81c-body-gestures.patch`](../../../patches/linux/7.3/0029-hid-xiaomi-p81c-body-gestures.patch) 在 `xiaomi_input_mapping` 中按 Report ID、字段长度和逻辑范围识别 Report2，把 `0x61`、`0x5B` 映射为 `KEY_PAGEUP`、`KEY_PAGEDOWN`，忽略 `0x6E`、`0x58` 和笔从不发送的其余用法。滑动因此不依赖本项目的用户空间程序，换用其他发行版时仍是 Page Up／Page Down；双击不再变成回车，滑动也不随 Num Lock 输出数字。原始 Report2 仍经 hidraw 交给触控进程中的笔输入。
+内核按 Report ID、字段长度和逻辑范围识别 Report2。滑动直接成为翻页键，
+不会随 Num Lock 输出数字；轻捏和双击交给内核笔解码器，与当前位置融合，
+不会同时变成键盘按键。原始 Report2 仍可通过 hidraw 采集。
 
 双击是笔的第二个按钮。tablet-tool 节点上的按钮必须有笔的位置，笔离开感应范围时双击不产生输入。按 Linux 笔输入的惯例，不支持笔的应用通常把 `BTN_STYLUS` 当作中键、`BTN_STYLUS2` 当作右键；Krita、Xournal++ 等绘图应用可以把它绑定到橡皮擦或其他工具。一个新手势替换仍按住的轻捏时，按 HID 数组语义结束轻捏，但不把被打断的轻捏当作一次点击。
 
-`piano-pen-bluetooth.py` 按 `p81c-radio.json` 的 `double_tap` 与 `slide` 在初始化时发送 `5F 01 01` 和 `63 01 01`，避免笔沿用上一个主机关掉的开关；不回应 `63` 的固件保留自己的默认值，不影响其余初始化。Linux 不在手势时发送振动命令，双击和滑动没有原厂那样的笔端振动。
+`pen-control.py` 按 `p81c-radio.json` 的 `double_tap` 与 `slide` 在初始化时发送 `5F 01 01` 和 `63 01 01`，避免笔沿用上一个主机关掉的开关；不回应 `63` 的固件保留自己的默认值，不影响其余初始化。Linux 不在手势时发送振动命令，双击和滑动没有原厂那样的笔端振动。
 
 ### 平板上的检查
 
@@ -292,4 +406,7 @@ Linux之前显示144Hz、hand180、pen240。两边笔扫描率相同；这一次
    hidraw 允许多个读者，这条命令不影响笔输入。书写后立即滑动不会发出报告，停笔片刻再试。
 4. `journalctl -b -u piano-touch.service | grep -e 630101 -e slide_setting_unanswered` 应找到 `"hex": "630101"` 的请求；出现 `slide_setting_unanswered` 表示这支笔的固件不回应滑动开关。
 
-把 `/usr/share/piano/pen/p81c-radio.json` 中的 `slide` 或 `double_tap` 改为 `false` 后执行 `sudo systemctl restart piano-touch.service`，可以在笔端关闭对应手势。
+第一次调整时，将 `/usr/share/piano/pen/p81c-radio.json` 复制为
+`/etc/piano/pen-radio.json`。把本地配置中的 `slide` 或 `double_tap` 改为
+`false`，再执行 `sudo systemctl restart piano-touch.service` 即可关闭笔端对应手势。
+升级设备配置包不会覆盖这个本地文件。

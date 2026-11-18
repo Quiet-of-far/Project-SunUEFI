@@ -44,7 +44,7 @@ def stage(args):
     adapters = output / 'piano-adapters'
     if adapters.exists():
         shutil.rmtree(adapters)
-    hardware.build(adapters, ROOT / cfg['debian']['source'], root)
+    hardware.build(adapters, ROOT / cfg['debian']['source'], root, include_camera=True)
     old_modules = []
     current_modules = modules.safe_target(
         root, Path('usr/lib/modules') / kernel['kernel_release'])
@@ -54,9 +54,6 @@ def stage(args):
     runtime.stage(args.runtime.resolve(), root)
     from build_piano_fingerprint import install_desktop
     install_desktop(root, args.runtime.resolve(), output / 'fingerprint-packages')
-    fw = ROOT / cfg['firmware']['components']
-    from stage_piano_firmware import stage as stage_firmware
-    stage_firmware(fw, root)
     # Use the reviewed, patched sensor importer source; Debian packaging itself
     # is not installed in Arch.
     sensor = args.sensor_source.resolve() / 'piano-sensors'

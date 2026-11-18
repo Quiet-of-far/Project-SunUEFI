@@ -18,22 +18,18 @@ STATIC EFI_STATUS ProductSmmuGuard(BOOLEAN Establish){
   if(!mProductExecuting || !mBlockBusy || !mInstalled || mExitRetained || mProductRetained || !mContext.Attached || !mContext.Verified ||
      !mContext.Domain || !mContext.TableMemory.Signature || mContext.TableMemory.Quarantined)return EFI_ACCESS_DENIED;
   if(Read(0x50)!=(UINT32)mTrl.DeviceAddress || Read(0x54)!=(UINT32)(mTrl.DeviceAddress>>32) || Read(0x58) || Read(0x78))return ProductRetain(EFI_COMPROMISED_DATA);
-  // File IO runs beside USB enumeration. Keep every register/peer check but
-  // do not dump the entire SMMU for each journal block at TPL_CALLBACK.
-  PIANO_SMMU_SNAPSHOT Current;EFI_STATUS S=PianoSmmuCaptureQuiet(mContext.Fdt,&Current);
+  // The owner validated the static controller binding when it opened. Every
+  // transfer still checks the live registers, peers and DMA mappings.
+  PIANO_SMMU_SNAPSHOT Current;
+  EFI_STATUS S=PianoSmmuRefreshSnapshot(&mContext.AttachedSnapshot,&Current);
   if(S!=EFI_SUCCESS)return ProductRetain(S);
   if(!Current.Valid || Current.Base!=0x15000000 || Current.Window!=0x100000 || !Current.Groups || Current.Groups>256 ||
      Current.GlobalFault || !Current.Device[0].Present || !Current.Device[0].Enabled ||
      (Current.Device[0].Fsr&PIANO_SMMU_FSR_FAULT_MASK))return ProductRetain(EFI_COMPROMISED_DATA);
   PIANO_SMMU_DEVICE Expected=mContext.AttachedSnapshot.Device[0];Expected.Fsr&=~PIANO_SMMU_FSR_FAULT_MASK;
   if(!ProductSameContext(&Expected,&Current.Device[0]) || (Current.Device[0].Ttbr0&0x0000FFFFFFFFF000ULL)!=mContext.TableMemory.Physical)return ProductRetain(EFI_COMPROMISED_DATA);
-  PIANO_DMA_BUFFER *Buffers[]={&mUcd,&mTrl,&mData};CONST UINTN Sizes[]={PIANO_UFS_UCD_BYTES,1024,4096};
-  for(UINTN I=0;I<3;++I){PIANO_DMA_BUFFER *B=Buffers[I];UINT64 First=0,Last=0;
-    if(!B->Signature || !B->Mapped || B->Active || B->Quarantined || B->ExitRetained || B->Device!=&mDevice || !B->Cpu || B->Bytes!=Sizes[I] || B->ReservedBytes!=4096 || B->MemoryType!=EfiReservedMemoryType || !(B->MemoryAttributes&EFI_MEMORY_WB) ||
-       B->Direction!=PianoDmaBidirectional || B->Alignment<4096 || ((B->Physical|B->DeviceAddress)&4095) || B->DeviceAddress>MAX_UINT32-B->Bytes+1 ||
-       PianoIoPageTableTranslate(&mContext.PageTable,B->DeviceAddress,TRUE,&First)!=EFI_SUCCESS ||
-       PianoIoPageTableTranslate(&mContext.PageTable,B->DeviceAddress+B->Bytes-1,TRUE,&Last)!=EFI_SUCCESS || First!=B->Physical || Last!=B->Physical+B->Bytes-1)return ProductRetain(EFI_COMPROMISED_DATA);
-  }
+  if(!ProductDmaBufferMapped(&mUcd,PIANO_UFS_UCD_BYTES) || !ProductDmaBufferMapped(&mTrl,1024) ||
+     !ProductDmaBufferMapped(&mData,UFS_DATA_DMA_BYTES))return ProductRetain(EFI_COMPROMISED_DATA);
   if(Establish){mProductLeaseBasis=Current;return EFI_SUCCESS;}
   CONST PIANO_SMMU_SNAPSHOT *B=&mProductLeaseBasis;
   if(Current.Base!=B->Base || Current.Window!=B->Window || Current.ContextBase!=B->ContextBase || Current.PageShift!=B->PageShift ||

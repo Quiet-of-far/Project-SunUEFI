@@ -55,6 +55,17 @@ def normalize_mainline_bindings(board):
         if props.get('iommus') == b'':
             del props['iommus']
             changes.append(path + ':iommus')
+        if props.get('bias-disable') == bytes(4):
+            # The standard property is a flag. Its default pinconf argument
+            # is zero, so removing the old zero cell preserves its meaning.
+            props['bias-disable'] = b''
+            changes.append(path + ':bias-disable')
+        if (path == '/soc/pcie@1c00000/pcie0_rp/cnss_pci0' and
+                props.get('reg') == b'' and 'compatible' not in props):
+            # This downstream placeholder has no PCI address. Keep its
+            # resources without presenting an empty address to DT decoders.
+            del props['reg']
+            changes.append(path + ':reg')
         if path == '/soc/remoteproc-adsp@03000000' and 'qcom,no-auto-boot' in props:
             del props['qcom,no-auto-boot']
             changes.append(path + ':qcom,no-auto-boot')
@@ -392,7 +403,7 @@ def scan_root(root, release, allow_authorized_key=False):
     modules = guest_resolve(root, '/lib/modules')
     if not modules.is_dir():
         modules = guest_resolve(root, '/usr/lib/modules')
-    require(modules.is_dir() and sorted(p.name for p in modules.iterdir()) == [release], 'Rootfs kernel modules/release mismatch')
+    require(modules.is_dir() and (modules / release).is_dir(), 'Rootfs kernel modules/release mismatch')
     return rows
 
 
@@ -428,7 +439,8 @@ def validate_authorized_key(root, root_meta):
 def verify_uki(path, sections):
     """Read the produced PE sections, not a build receipt."""
     import pefile
-    image_info(path, kernel=False)
+    # systemd-boot loads the UKI through UEFI, not through SimpleInit.
+    image_info(path, kernel=False, simpleinit_limit=False)
     pe = pefile.PE(str(path), fast_load=True)
     rows = {}
     try:
@@ -611,7 +623,7 @@ def package(args):
                 values.get('CONFIG_CMDLINE_FORCE', 'n') == 'n',
                 'Product kernel must accept boot arguments without embedded defaults')
     require(uefi.read_bytes()[:8] == b'ANDROID!', 'UEFI must be an Android boot container')
-    image_info(image)
+    image_info(image, simpleinit_limit=False)
     fdt_info(dtb)
     initramfs_info(initrd)
     with gzip.open(initrd, 'rb') as stream:
@@ -628,17 +640,24 @@ def package(args):
     rows = scan_root(root, release, allow_authorized_key=args.include_piano_authorized_key)
     stub = (Path(args.stub).absolute() if getattr(args, 'stub', None) else
             guest_resolve(root, '/usr/lib/systemd/boot/efi/linuxaa64.efi.stub'))
+    systemd_boot = (Path(args.systemd_boot).absolute() if getattr(args, 'systemd_boot', None) else
+                    guest_resolve(root, '/usr/lib/systemd/boot/efi/systemd-bootaa64.efi'))
+    layout = getattr(args, 'boot_layout', 'bls')
     ukify = Path(args.ukify).absolute()
-    require(ukify.is_file(), 'Install systemd-ukify or pass --ukify')
+    if layout == 'uki':
+        require(ukify.is_file(), 'Install systemd-ukify or pass --ukify')
     efi_sources = {}
-    for name, source in (('stub', stub),):
+    efi_inputs = [('systemd_boot', systemd_boot)]
+    if layout == 'uki':
+        efi_inputs.insert(0, ('stub', stub))
+    for name, source in efi_inputs:
         require(source.is_file() and not source.is_symlink(), 'Expected regular EFI application: ' + str(source))
-        info = image_info(source, kernel=False)
+        info = image_info(source, kernel=False, simpleinit_limit=False)
         efi_sources[name] = {'source': str(source), 'bytes': info['bytes'], 'sha256': info['sha256']}
     esp_only = getattr(args, 'esp_only', False)
     build_root = bool(args.root_size_mib) and not esp_only
     build_archive = not esp_only and (not args.root_size_mib or args.root_archive)
-    tools = ['mkfs.vfat', 'mmd', 'mcopy']
+    tools = ['mkfs.vfat', 'mcopy']
     if build_archive:
         tools += ['tar', 'zstd']
     if build_root:
@@ -654,7 +673,8 @@ def package(args):
     for source, name, expected in zip(sources, names, hashes):
         shutil.copyfile(source, work / name)
         require(sha(work / name) == expected, 'Source changed while copying: ' + name)
-    for name, source, filename in (('stub', stub, 'linuxaa64.efi.stub'),):
+    for name, source in efi_inputs:
+        filename = 'linuxaa64.efi.stub' if name == 'stub' else 'systemd-bootaa64.efi'
         shutil.copyfile(source, work / filename)
         require(sha(work / filename) == efi_sources[name]['sha256'], 'Source changed while copying: ' + filename)
     dtb_derivation = None
@@ -672,13 +692,30 @@ def package(args):
     panel_selection = None
     if args.panel_vendor:
         panel_selection = select_panel_vendor(work / 'board.dtb', args.panel_vendor)
-    # The startup image is shared by every rootfs; distro identity stays in root.
-    os_release = b'ID=linux\nPRETTY_NAME="Linux"\n'
-    uki = work / 'sunuefi.efi'
-    uki_sections = build_uki(ukify, work / 'linuxaa64.efi.stub', uki, work / 'Image',
-                             work / 'initramfs', work / 'board.dtb', command_line,
-                             release, os_release, work)
-    esp_files = {'/EFI/Linux/sunuefi.efi': uki}
+    # Omit the sort key from the shared entry so distro-managed entries take priority.
+    os_release = b'PRETTY_NAME="Linux"\n'
+    loader_config = work / 'loader.conf'
+    loader_config.write_text('timeout 3\nconsole-mode keep\n')
+    uki_sections = None
+    if layout == 'uki':
+        uki_name = 'linux-' + release + '.efi'
+        uki = work / uki_name
+        uki_sections = build_uki(ukify, work / 'linuxaa64.efi.stub', uki, work / 'Image',
+                                work / 'initramfs', work / 'board.dtb', command_line,
+                                release, os_release, work)
+        esp_files = {'/EFI/Linux/' + uki_name: uki}
+    else:
+        entry = work / 'linux.conf'
+        base = '/linux/' + release
+        entry.write_text('title Linux\nversion ' + release + '\n'
+                         'linux ' + base + '/linux\ninitrd ' + base + '/initrd\n'
+                         'devicetree ' + base + '/board.dtb\noptions ' + command_line + '\n')
+        esp_files = {base + '/linux': work / 'Image', base + '/initrd': work / 'initramfs',
+                     base + '/board.dtb': work / 'board.dtb',
+                     '/loader/entries/linux-' + release + '.conf': entry}
+    esp_files.update({'/EFI/systemd/systemd-bootaa64.efi': work / 'systemd-bootaa64.efi',
+                 '/EFI/BOOT/BOOTAA64.EFI': work / 'systemd-bootaa64.efi',
+                 '/loader/loader.conf': loader_config})
     for path in esp_files.values():
         os.utime(path, (max(args.epoch, 315532800),) * 2)  # FAT dates start in 1980.
     esp = output / 'esp.img'
@@ -688,10 +725,19 @@ def package(args):
     # Piano UFS exposes 4 KiB logical sectors; Linux rejects a smaller BPB
     # sector size even when firmware can read the filesystem.
     run(['mkfs.vfat', '--invariant', '-S', '4096', '-F', '32', '-n', 'SUNUEFI_ESP', esp])
-    run(['mmd', '-i', esp, '::/EFI', '::/EFI/Linux'])
+    esp_tree = work / 'esp-tree'
     for destination, path in esp_files.items():
-        run(['mcopy', '-m', '-i', esp, path, '::' + destination])
-        verify = work / ('readback-' + path.name)
+        target = esp_tree / destination.lstrip('/')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
+    for path in [*esp_tree.rglob('*'), esp_tree]:
+        os.utime(path, (max(args.epoch, 315532800),) * 2)
+    # Copy the directory tree with preserved times too. mmd stamps directories
+    # with wall-clock time, making otherwise identical product ESPs differ.
+    for directory in sorted(esp_tree.iterdir()):
+        run(['mcopy', '-s', '-m', '-i', esp, directory, '::/'])
+    for destination, path in esp_files.items():
+        verify = work / ('readback-' + destination.lstrip('/').replace('/', '-'))
         run(['mcopy', '-i', esp, '::' + destination, verify])
         require(sha(verify) == sha(path), 'ESP file readback differs: ' + path.name)
     if build_archive:
@@ -703,8 +749,9 @@ def package(args):
     shutil.move(work / names[0], output / names[0])
     result = {'schema_version': 1, 'status': 'HOST_BUILT_NOT_DEVICE_READY', 'kernel_release': release, 'root_policy': args.root_selector,
               'command_line': command_line,
-              'epoch': args.epoch, 'uki': {'sections': uki_sections, 'ukify_sha256': sha(ukify),
-                                        'stub_sha256': sha(stub)},
+              'epoch': args.epoch, 'boot_layout': layout,
+              'uki': {'sections': uki_sections, 'ukify_sha256': sha(ukify),
+                      'stub_sha256': sha(stub)} if layout == 'uki' else None,
               'device_operation_performed': False, 'device_ready': False,
               'components': {**{name: {'sha256': value} for name, value in zip(('uefi', 'kernel', 'dtb', 'initramfs'), hashes)}, **efi_sources},
               'kernel_manifest_sha256': sha(kernel / 'manifest.json') if (kernel / 'manifest.json').is_file() else None,
@@ -745,9 +792,13 @@ def parser():
     for name in ('uefi', 'kernel', 'dtb', 'initramfs'):
         ap.add_argument('--' + name + '-sha256')
     ap.add_argument('--kernel-release')
+    ap.add_argument('--boot-layout', choices=('bls', 'uki'), default='bls',
+                    help='Standard split kernel/initramfs entries (default), or unified kernel images')
     ap.add_argument('--rootfs-manifest', type=Path)
     ap.add_argument('--stub', type=Path,
                     help='ARM64 systemd EFI stub (default: from rootfs)')
+    ap.add_argument('--systemd-boot', type=Path,
+                    help='ARM64 systemd-boot EFI application (default: from rootfs)')
     ap.add_argument('--ukify', type=Path, default=Path('/usr/lib/systemd/ukify'),
                     help='systemd ukify build tool')
     ap.add_argument('--root-selector', default='LABEL=PIANOROOT')

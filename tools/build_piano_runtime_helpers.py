@@ -17,8 +17,8 @@ import shutil
 import struct
 import subprocess
 
-from prepare_linux_modules import modinfo
 from desktop import prepare_kernel_llvm
+from package import v4l2loopback
 
 ROOT=Path(__file__).resolve().parents[1]
 PUBLIC_COMMIT='a75f8c5d5fa099d65c171ac839c2e3bb6c63ec45'
@@ -26,7 +26,6 @@ UAPI_COMMIT='352508459733d3e6d349ea5581a8dd2fd8bb4180'
 UAPI_DIGEST='c4c7b7358f4440da8832eea607ff812fb5481181401e869a34cca70bbe103d4c'
 SOURCE_PINS=json.loads((ROOT/'sources.lock.json').read_text())
 MACROS_COMMIT=SOURCE_PINS['audioreach-topology']['commit']
-LOOP_COMMIT=SOURCE_PINS['v4l2loopback']['commit']
 PUBLIC_SOURCES={
  'piano-touch-view':('initramfs/touch-view/piano-touch-view.c','eb1bac5a7bfac3200248ebe39e8d9564bed3d7848b11655ded5d065dc0ef6e12','usr/bin/piano-touch-view'),
  'piano-pd-locator':('initramfs/pd-locator/piano-pd-locator.c','8de9d2840a896b4bd6c90bd4b124479d2f142e9e85420f2022894bb32fc8dde8','usr/sbin/piano-pd-locator')}
@@ -39,7 +38,15 @@ PEN_SOURCE_FILES=('Makefile','piano-pen-frame.c','piano-pen-frame.h',
  'piano-pen-decoder.hpp','piano-pen-offline.cpp','piano-pen-owner.c',
  'piano-pen-owner.h','Apache-2.0.txt','OPEN_CORE_ORIGIN.txt')
 PEN_DOCUMENTS=('Apache-2.0.txt','OPEN_CORE_ORIGIN.txt')
-PEN_RUNTIME_PATHS={'usr/bin/piano-pen-offline','usr/bin/piano-pen-canvas','usr/lib/piano/pen-bluetooth','usr/lib/piano/touch-input','usr/share/piano/pen/p81c-radio.json'}|{
+PEN_CALIBRATION_PATHS={
+ 'usr/lib/firmware/novatek/piano-'+panel+'-pen.ini':
+ 'linux/bsp/common/usr/share/piano/pen/calibration/piano-'+panel+'.ini'
+ for panel in ('boe','csot')}
+PEN_KERNEL_SOURCE_FILES=(
+ 'drivers/input/touchscreen/nt36532e/nt36xxx-pen.c',
+ 'drivers/input/touchscreen/nt36532e/nt36xxx-pen-input.c',
+ 'include/linux/input/xiaomi-pen.h')
+PEN_RUNTIME_PATHS={'usr/bin/piano-pen-offline','usr/bin/piano-pen-canvas'}|{
  'usr/share/doc/piano-pen-offline/'+name for name in PEN_DOCUMENTS}
 TOOL_PINS={'clang':'939a882527432ec23b094c289e7f170bf2d6ec282e74dde75e31b08602fa3eae',
  'ld.lld':'57b6c64db534793f05918a6e935c900e9938bd64d0ac95933285930b568387ea',
@@ -47,6 +54,7 @@ TOOL_PINS={'clang':'939a882527432ec23b094c289e7f170bf2d6ec282e74dde75e31b08602fa
 QEMU_PIN='73cc2584f119f9e74c85c0a8549dbb6fd104ae3897a06a7500797f9e5b4d0943'
 ALSA_TOOLCHAIN_PIN='09676a0fc68ee9cd5ba6684646b7e82c96e2ed5ac7ba53d639c4fe53b0612346'
 TOPOLOGY_PIN=json.loads((ROOT/'config/release.json').read_text())['audio_topology']['sha256']
+TOPOLOGY_PATH=Path('qcom/sm8750/Xiaomi Pad 8 Pro-tplg.bin')
 DEFAULT_RELEASE='7.2.6-piano-gnome-00061-g352508459733'
 TOUCH_DIAGNOSTICS_PATCH=ROOT/'tools/patches/piano-touch-view-observability.patch'
 TOUCH_CAPTURE_PATCH=ROOT/'tools/patches/piano-touch-view-raw-capture.patch'
@@ -54,7 +62,6 @@ TOUCH_PEN_PATCH=ROOT/'tools/patches/piano-touch-view-pen-owner.patch'
 TOUCH_EPOCH_PATCH=ROOT/'tools/patches/piano-touch-view-epoch-reset.patch'
 TOUCH_LINE_NOISE_PATCH=ROOT/'tools/patches/piano-touch-view-line-noise.patch'
 TOUCH_PALM_PATCH=ROOT/'tools/patches/piano-touch-view-palm-rejection.patch'
-LOOPBACK_PATCH_SERIES=ROOT/'patches/v4l2loopback/0.15.4/series.json'
 
 
 def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -77,7 +84,7 @@ def build_topology(public, macros, destination, env=None):
     policy=json.loads((ROOT/'config/release.json').read_text())['audio_topology']
     source=ROOT/policy['source']
     config=destination/'piano.conf'
-    target=destination/'qcom/sm8750/Xiaomi Pad 8 Pro-tplg.bin'
+    target=destination/TOPOLOGY_PATH
     target.parent.mkdir(parents=True,exist_ok=True)
     with config.open('w') as output:
         subprocess.run(['m4','-I',public/'topology','-I',macros,source],
@@ -173,7 +180,7 @@ def prepare_camera_quad(source, work, env):
     return dependency
 
 
-def build_camera(output, cc_flags, cxx_flags, uapi, sysroot=None, env=None,
+def build_camera(output, cc_flags, cxx_flags, uapi=None, sysroot=None, env=None,
                  emulator=None, linker_flags=()):
     """Use the same camera Makefile as Nix; install no global files."""
     output = Path(output).resolve()
@@ -194,7 +201,7 @@ def build_camera(output, cc_flags, cxx_flags, uapi, sysroot=None, env=None,
     command = ['make', '-C', source, 'OUT=' + str(built),
                'CC=' + shlex.join(map(str, cc_flags)), 'CXX=' + shlex.join(map(str, cxx_flags)),
                'CFLAGS=' + shlex.join(flags),
-               'CPPFLAGS=' + shlex.join(['-isystem', str(Path(uapi) / 'include')]),
+               'CPPFLAGS=' + (shlex.join(['-isystem', str(Path(uapi) / 'include')]) if uapi else ''),
                'LDFLAGS=' + shlex.join(['-static', *linker_flags]),
                'PKG_CONFIG=pkg-config --static',
                # Debian's libyuv-dev supplies no .pc file. The compiler
@@ -277,12 +284,54 @@ def verify_elf(path):
     return {'bytes':len(raw),'sha256':sha(path),'machine':183,'static_no_pt_interp':True}
 
 
-def build_pen_core(output, cc_flags, sysroot=None, env=None, emulator=None):
-    """Build the same offline C/C++ sources in both runtime pipelines; no ini input."""
+def pen_kernel_inputs(kernel, firmware_root):
+    """Verify the kernel input and firmware used by the runtime bundle."""
+    from build_piano_ram_bootstrap import guest_resolve
+
+    kernel_source, build = Path(kernel['source']), Path(kernel['build'])
+    paths = [kernel_source / name for name in PEN_KERNEL_SOURCE_FILES]
+    if not all(path.is_file() for path in paths):
+        raise ValueError('Kernel pen source is incomplete; build the current Piano kernel')
+    config = (build / '.config').read_text()
+    options = dict(re.findall(r'^(CONFIG_[A-Z0-9_]+)=(.*)$', config, re.M))
+    touch, hid = (options.get(name) for name in
+                  ('CONFIG_TOUCHSCREEN_NT36532E_SPI', 'CONFIG_HID_XIAOMI'))
+    if (touch not in ('y', 'm') or hid not in ('y', 'm') or
+            (touch == 'y' and hid == 'm') or options.get('CONFIG_FW_LOADER') != 'y'):
+        raise ValueError('The matched kernel cannot reach pen decoding, HID or firmware loading')
+    symbols = {fields[1] for line in (build / 'Module.symvers').read_text().splitlines()
+               if len(fields := line.split()) >= 4 and fields[3] == 'EXPORT_SYMBOL_GPL' and
+               fields[2] in ('drivers/hid/hid-xiaomi', 'vmlinux')}
+    if not {'xiaomi_pen_register_notifier', 'xiaomi_pen_unregister_notifier'} <= symbols:
+        raise ValueError('Build the matched kernel pen/HID modules before selecting kernel input')
+    if firmware_root is None:
+        raise ValueError('Kernel pen runtime needs a target root with the standard firmware calibration')
+    inputs = {str(path): sha(path) for path in paths}
+    calibrations = {}
+    for name, original in PEN_CALIBRATION_PATHS.items():
+        installed = guest_resolve(Path(firmware_root), '/' + name)
+        expected = ROOT / original
+        if not installed.is_file() or sha(installed) != sha(expected):
+            raise ValueError('Stage the matching pen calibration before runtime build: /' + name)
+        calibrations[name] = sha(installed)
+        inputs[str(expected)] = sha(expected)
+    release = kernel['release']
+    if not re.fullmatch(r'[a-zA-Z0-9_.+-]{1,128}', release):
+        raise ValueError('Invalid kernel release for pen runtime')
+    record = {'mode': 'kernel', 'kernel_release': release, 'calibration': calibrations}
+    return record, inputs
+
+
+def build_pen_core(output, cc_flags, sysroot=None, env=None, emulator=None, *, kernel,
+                   firmware_root=None):
+    """Build the pen diagnostic tools for the matched kernel."""
     output=Path(output).resolve();env=os.environ.copy() if env is None else env
     source=ROOT/'linux/userspace/pen';copied=output/'pen-source';built=output/'pen-core'
+    pen_input,kernel_inputs=pen_kernel_inputs(
+        kernel,sysroot if firmware_root is None else firmware_root)
     copied.mkdir();built.mkdir()
     inputs={str(Path(__file__).resolve()):sha(Path(__file__).resolve())}
+    inputs.update(kernel_inputs)
     for name in PEN_SOURCE_FILES:
         original=source/name;inputs[str(original)]=sha(original)
         shutil.copyfile(original,copied/name)
@@ -331,30 +380,12 @@ def build_pen_core(output, cc_flags, sysroot=None, env=None, emulator=None):
                               if Path(path).is_relative_to(source)},
                 compile_exit_code=0,help_exit_code=help_result.returncode,help_no_device_access=True)
     files={'usr/bin/piano-pen-offline':item}
-    script=source/'piano-pen-bluetooth.py';inputs[str(script)]=sha(script)
-    copied_script=copied/script.name;shutil.copyfile(script,copied_script)
-    files['usr/lib/piano/pen-bluetooth']={
-        'file':str(copied_script.relative_to(output)),'bytes':copied_script.stat().st_size,
-        'sha256':sha(copied_script),'mode':0o755,'source_kind':'project-pen-control',
-        'source_path':'linux/userspace/pen/piano-pen-bluetooth.py'}
-    profile=ROOT/'linux/bsp/common/usr/share/piano/pen/p81c-radio.json';inputs[str(profile)]=sha(profile)
-    copied_profile=copied/profile.name;shutil.copyfile(profile,copied_profile)
-    files['usr/share/piano/pen/p81c-radio.json']={
-        'file':str(copied_profile.relative_to(output)),'bytes':copied_profile.stat().st_size,
-        'sha256':sha(copied_profile),'mode':0o644,'source_kind':'board-pen-radio-profile',
-        'source_path':'linux/bsp/common/usr/share/piano/pen/p81c-radio.json'}
     canvas=source/'piano-pen-canvas.py';inputs[str(canvas)]=sha(canvas)
     copied_canvas=copied/canvas.name;shutil.copyfile(canvas,copied_canvas)
     files['usr/bin/piano-pen-canvas']={
         'file':str(copied_canvas.relative_to(output)),'bytes':copied_canvas.stat().st_size,
         'sha256':sha(copied_canvas),'mode':0o755,'source_kind':'project-pen-drawing',
         'source_path':'linux/userspace/pen/piano-pen-canvas.py'}
-    frontend=source/'piano-touch-input';inputs[str(frontend)]=sha(frontend)
-    copied_frontend=copied/frontend.name;shutil.copyfile(frontend,copied_frontend)
-    files['usr/lib/piano/touch-input']={
-        'file':str(copied_frontend.relative_to(output)),'bytes':copied_frontend.stat().st_size,
-        'sha256':sha(copied_frontend),'mode':0o755,'source_kind':'project-touch-input',
-        'source_path':'linux/userspace/pen/piano-touch-input'}
     for name in PEN_DOCUMENTS:
         path=copied/name
         files['usr/share/doc/piano-pen-offline/'+name]={
@@ -366,7 +397,8 @@ def build_pen_core(output, cc_flags, sysroot=None, env=None, emulator=None):
             'cxx_command':cxx,
             'archive':{'file':str(archive.relative_to(output)),'bytes':archive.stat().st_size,
                        'sha256':sha(archive),'installed':False},
-            'ini_required_at_build':False,'device_operation':False,'drawing_input_enabled':False}
+            'ini_required_at_build':True,'device_operation':False,
+            'drawing_input_enabled':False,'input':pen_input}
     (output/'pen-manifest.json').write_text(json.dumps(record,indent=2)+'\n')
     return files,record
 
@@ -394,16 +426,23 @@ def build_touch_binary(output, cc_flags, uapi, source, pen_record, env=None, lin
     return row
 
 
-def stage(output,destination):
+def stage(output,destination,*,ram_boot=False):
     if not destination.resolve().is_relative_to(ROOT/'build/distros'):raise ValueError('Stage only into a derived workspace distro')
     manifest=json.loads((output/'manifest.json').read_text());files=manifest['runtime_files'];release=manifest['kernel']['release']
     if not re.fullmatch(r'[a-zA-Z0-9_.+-]{1,128}',release):raise ValueError('Unsafe runtime kernel release')
-    expected={row[2]for row in PUBLIC_SOURCES.values()}|PEN_RUNTIME_PATHS|CAMERA_RUNTIME_PATHS|{'usr/lib/firmware/qcom/sm8750/Xiaomi Pad 8 Pro-tplg.bin','usr/lib/modules/'+release+'/updates/v4l2loopback.ko'}
+    expected={row[2]for row in PUBLIC_SOURCES.values()}|PEN_RUNTIME_PATHS
+    if ram_boot:
+        expected.add((Path('usr/lib/firmware')/TOPOLOGY_PATH).as_posix())
+        expected |= CAMERA_RUNTIME_PATHS
+        expected.add(v4l2loopback.module_path(release).as_posix())
     if manifest.get('fingerprint'):
         from build_piano_fingerprint import RUNTIME_PATHS
         expected |= RUNTIME_PATHS
     if set(files)!=expected:raise ValueError('Runtime bundle source/install paths differ from the exact contract')
     if not(destination/'usr/lib/modules'/release/'kernel').is_dir():raise ValueError('Stage the matching full kernel module tree first')
+    pen_input,_=pen_kernel_inputs(manifest['kernel'],destination)
+    if manifest['pen_core'].get('input')!=pen_input:
+        raise ValueError('Rebuild the pen runtime for this kernel and calibration')
     # Prevalidate the entire generation before changing any destination file.
     for name,row in files.items():
         p=output/row['file']
@@ -412,7 +451,8 @@ def stage(output,destination):
         if not p.is_file()or p.is_symlink()or p.stat().st_size!=row['bytes']or sha(p)!=row['sha256']:raise ValueError('Runtime bundle changed: '+name)
     for name,row in files.items():
         target=destination/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(output/row['file'],target);target.chmod(row['mode'])
-    subprocess.run(['depmod','-b',str(destination),'-m','/usr/lib/modules',manifest['kernel']['release']],check=True)
+    if ram_boot:
+        subprocess.run(['depmod','-b',str(destination),'-m','/usr/lib/modules',release],check=True)
     record={'status':'REAL_RUNTIME_STAGED_NOT_DEVICE_TESTED','bundle_manifest_sha256':sha(output/'manifest.json'),'kernel':manifest['kernel'],'files':files,'pen_core':manifest['pen_core'],'device_tested':False}
     p=destination/'usr/share/piano-provenance/runtime-helpers.json';p.parent.mkdir(parents=True,exist_ok=True);p.write_text(json.dumps(record,indent=2)+'\n')
     return record
@@ -427,7 +467,8 @@ def build(args):
     # the external module binds the independently requested kernel commit/ABI.
     uapi=args.uapi.resolve();uapi_rows=tree_files(uapi/'include')
     if tree_digest(uapi_rows)!=UAPI_DIGEST:raise ValueError('3525 UAPI header generation changed')
-    repository(args.macros.resolve(),MACROS_COMMIT);repository(args.v4l2_source.resolve(),LOOP_COMMIT)
+    repository(args.macros.resolve(),MACROS_COMMIT)
+    loop=args.v4l2_source.resolve();loop_commit=v4l2loopback.source_pin()['commit'];repository(loop,loop_commit)
     tools=ROOT/'build/host-tools/usr/bin';env=os.environ.copy();env['PATH']=str(tools)+os.pathsep+env['PATH'];env['LD_LIBRARY_PATH']=str(ROOT/'build/host-tools/usr/lib')
     inputs={str(Path(__file__).resolve()):sha(Path(__file__).resolve())}
     for path in (Path(prepare_kernel_llvm.__file__),prepare_kernel_llvm.POLICY):
@@ -436,7 +477,8 @@ def build(args):
     inputs[str(TOUCH_CAPTURE_PATCH)]=sha(TOUCH_CAPTURE_PATCH)
     inputs[str(TOUCH_PEN_PATCH)]=sha(TOUCH_PEN_PATCH)
     inputs[str(TOUCH_EPOCH_PATCH)]=sha(TOUCH_EPOCH_PATCH)
-    for patch in [LOOPBACK_PATCH_SERIES,*source_patches(LOOPBACK_PATCH_SERIES)]:
+    for patch in [Path(v4l2loopback.__file__),ROOT/'sources.lock.json',
+                  v4l2loopback.PATCH_SERIES,*source_patches(v4l2loopback.PATCH_SERIES)]:
         inputs[str(patch)]=sha(patch)
     for name,pin in TOOL_PINS.items():
         p=tools/name
@@ -472,7 +514,8 @@ def build(args):
     inputs.update(identity['inputs']);output.mkdir(parents=True);log=output/'build.log';files={};commands=[]
     flags=[tools/'clang','--target=aarch64-linux-gnu','--sysroot='+str(sysroot),'--gcc-toolchain='+str(sysroot/'usr'),'-O2','-Wall','-Wextra','-Werror']
     touch_source,touch_provenance=derive_touch_source(public,output)
-    pen_files,pen_record=build_pen_core(output,flags,sysroot,env,qemu)
+    pen_files,pen_record=build_pen_core(
+        output,flags,sysroot,env,qemu,kernel=identity,firmware_root=args.firmware_root)
     files.update(pen_files);inputs.update(pen_record['inputs'])
     camera_files,camera_record=build_camera(output,flags,pen_record['cxx_command'],uapi,sysroot,env,qemu,('-fuse-ld=lld',))
     files.update(camera_files);inputs.update(camera_record['inputs'])
@@ -491,32 +534,26 @@ def build(args):
     wrapper=output/'host-bin';wrapper.mkdir();exe=wrapper/'alsatplg';launch=[alsa['loader'],'--library-path',str(alsa_root/'usr/lib/x86_64-linux-gnu'),str(alsa_root/'usr/bin/alsatplg')]
     import shlex
     exe.write_text('#!/bin/sh\nexec '+shlex.join(launch)+' "$@"\n');exe.chmod(0o755);top_env=env.copy();top_env['PATH']=str(wrapper)+os.pathsep+top_env['PATH']
-    build_topology(public,args.macros.resolve(),output/'firmware',top_env)
-    tplg=output/'firmware/qcom/sm8750/Xiaomi Pad 8 Pro-tplg.bin'
+    tplg=build_topology(public,args.macros.resolve(),output/'firmware',top_env)
     if sha(tplg)!=TOPOLOGY_PIN:raise ValueError('Public topology differs from validated repeat build')
     run([*launch,'-d',tplg,'-o',output/'topology-decoded.conf'],env,log)
-    files['usr/lib/firmware/qcom/sm8750/Xiaomi Pad 8 Pro-tplg.bin']={'file':tplg.relative_to(output).as_posix(),'bytes':tplg.stat().st_size,'sha256':sha(tplg),'mode':0o644,'decode_exit_code':0,'device_tested':False}
-    module_source=output/'v4l2loopback';module_source.mkdir()
-    tracked=capture(['git','ls-files','-z'],args.v4l2_source.resolve()).split('\0')
-    for name in filter(None,tracked):
-        original=args.v4l2_source.resolve()/name;target=module_source/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(original,target);inputs[str(original)]=sha(original)
-    for patch in source_patches(LOOPBACK_PATCH_SERIES):
-        subprocess.run(['patch','--batch','--forward','--fuzz=0',
-                        '--no-backup-if-mismatch','-p1','-i',str(patch)],
-                       cwd=module_source,check=True)
+    files[(Path('usr/lib/firmware')/TOPOLOGY_PATH).as_posix()]={'file':tplg.relative_to(output).as_posix(),'bytes':tplg.stat().st_size,'sha256':sha(tplg),'mode':0o644,'decode_exit_code':0,'device_tested':False}
     module_env=prepare_kernel_llvm.environment(env)
     module_compiler=Path(shutil.which('clang',path=module_env['PATH']))
     inputs[str(module_compiler)]=sha(module_compiler)
-    run(['make','-C',args.kernel_build.resolve(),'M='+str(module_source),'ARCH=arm64','LLVM=1','LLVM_IAS=1','LOCALVERSION=','-j4','modules'],module_env,log)
-    module=module_source/'v4l2loopback.ko';run(['llvm-strip','--strip-debug',module],module_env,log);info=modinfo(module)
-    if info.get('name')!='v4l2loopback'or info.get('vermagic','').split()[0]!=args.kernel_release:raise ValueError('External module does not match requested exact kernel')
-    files['usr/lib/modules/'+args.kernel_release+'/updates/v4l2loopback.ko']={'file':module.relative_to(output).as_posix(),'bytes':module.stat().st_size,'sha256':sha(module),'mode':0o644,'vermagic':info['vermagic'],'source_commit':LOOP_COMMIT,'strip_debug':True,'loaded':False}
+    module,info=v4l2loopback.compile_module(args.kernel_build.resolve(),loop,output/'v4l2loopback',
+                                           args.kernel_release,module_env,strip_debug=True)
+    files[v4l2loopback.module_path(args.kernel_release).as_posix()]={
+        'file':module.relative_to(output).as_posix(),'bytes':module.stat().st_size,
+        'sha256':sha(module),'mode':0o644,'vermagic':info['vermagic'],
+        'source_commit':loop_commit,'strip_debug':True,'loaded':False}
+    repository(loop,loop_commit)
     for name,pin in inputs.items():
         if sha(Path(name))!=pin:raise ValueError('Runtime build input changed: '+name)
     kernel_identity(args.kernel_build.resolve(),source,args.kernel_commit,args.kernel_release)
-    manifest={'status':'RUNTIME_COMPILED_NOT_DEVICE_TESTED','public_commit':PUBLIC_COMMIT,'uapi_commit':UAPI_COMMIT,'uapi_sha256':UAPI_DIGEST,'macros_commit':MACROS_COMMIT,'v4l2_commit':LOOP_COMMIT,'kernel':identity,'inputs':inputs,'runtime_files':files,'pen_core':pen_record,'camera':camera_record,'hardware_verified':False,'device_operation':False,'known_topology_limit':'ALSA decoded config does not recompile vendor data; original public config matches known binary SHA and decodes successfully'}
+    manifest={'status':'RUNTIME_COMPILED_NOT_DEVICE_TESTED','public_commit':PUBLIC_COMMIT,'uapi_commit':UAPI_COMMIT,'uapi_sha256':UAPI_DIGEST,'macros_commit':MACROS_COMMIT,'v4l2_commit':loop_commit,'kernel':identity,'inputs':inputs,'runtime_files':files,'pen_core':pen_record,'camera':camera_record,'hardware_verified':False,'device_operation':False,'known_topology_limit':'ALSA decoded config does not recompile vendor data; original public config matches known binary SHA and decodes successfully'}
     (output/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
-    if args.stage_rootfs:stage(output,args.stage_rootfs.resolve())
+    if args.stage_rootfs:stage(output,args.stage_rootfs.resolve(),ram_boot=True)
     return manifest
 
 
@@ -525,6 +562,8 @@ def parser():
     p.add_argument('--public-source',type=Path,default=ROOT/'upstream/debian-piano-current');p.add_argument('--uapi',type=Path,default=ROOT/'build/piano-runtime/uapi')
     p.add_argument('--sysroot',type=Path,default=ROOT/'build/distros/piano-runtime-build',
                    help='Prepared ARM64 GNU development sysroot with static libyuv/libjpeg');p.add_argument('--macros',type=Path,default=ROOT/'build/piano-runtime/topology/macros');p.add_argument('--alsa-tools',type=Path,default=ROOT/'build/piano-runtime/topology/host-tools')
+    p.add_argument('--firmware-root',type=Path,
+                   help='Target root containing pen firmware calibration; defaults to --sysroot')
     p.add_argument('--v4l2-source',type=Path,default=ROOT/'build/piano-runtime/v4l2loopback');p.add_argument('--kernel-source',type=Path,default=ROOT/'build/kernel-worktrees/piano-full-integration');p.add_argument('--kernel-commit',default=UAPI_COMMIT)
     p.add_argument('--kernel-build',type=Path,default=ROOT/'build/kernels/full-integration');p.add_argument('--kernel-release',default=DEFAULT_RELEASE);p.add_argument('--stage-rootfs',type=Path)
     return p

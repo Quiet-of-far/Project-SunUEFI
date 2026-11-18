@@ -136,10 +136,8 @@ def prepare_recipes(inputs, sensors):
         sensor_recipes(recipes, sensors)
     mesa = recipes / 'mesa'
     if not (mesa / 'PKGBUILD').is_file():
-        shutil.copytree(ROOT / 'linux/bsp/arch/mesa', mesa)
-        shutil.copy2(
-            ROOT / 'upstream/piano-mesa-current/patches/0001-freedreno-Add-chip-id-support-for-A830v1.patch',
-            mesa)
+        from build.arch_mesa import recipe
+        recipe(mesa)
     return recipes
 
 
@@ -193,10 +191,12 @@ def build(args):
     if not sensors.exists():
         sensor_sources(sensors, policy['sensors'])
     recipes = prepare_recipes(inputs, sensors)
+    from build.arch_mesa import validate as validate_mesa
     for name in ('mesa', 'fastrpc', 'libssc', 'iio-sensor-proxy'):
         packages = output / 'packages' / name
         if not (packages / 'manifest.json').is_file():
-            build_arch_package.build(root, recipes / name, packages, resume=args.resume)
+            build_arch_package.build(root, recipes / name, packages, resume=args.resume,
+                                     validate=validate_mesa if name == 'mesa' else None)
 
     ffmpeg = output / 'packages/ffmpeg'
     if not (ffmpeg / 'SOURCE.json').is_file():
@@ -211,6 +211,10 @@ def build(args):
     if not source_manifest.is_file() or not (kernel / 'manifest.json').is_file():
         raise ValueError('Build the Piano kernel first with ./build.sh linux')
     source = Path(json.loads(source_manifest.read_text())['worktree'])
+    from build.overlay_packages import install_local_arch_bsp
+    from stage_piano_firmware import stage as stage_firmware
+    install_local_arch_bsp(root)
+    stage_firmware(ROOT / policy['firmware']['components'], root, 'pacman')
     runtime = output / 'runtime'
     if not (runtime / 'manifest.json').is_file():
         if runtime.exists():
@@ -220,7 +224,7 @@ def build(args):
         run(sys.executable, ROOT / 'tools/build_release_helpers.py',
             '--kernel', kernel, '--source', source,
             '--kernel-build', kernel_build, '--output', runtime,
-            '--sysroot', args.bootstrap_sysroot.resolve(), '--cc', 'clang')
+            '--sysroot', args.bootstrap_sysroot.resolve(), '--firmware-root', root, '--cc', 'clang')
 
     stage_arch_piano.stage(argparse.Namespace(
         rootfs=root, kernel=kernel, runtime=runtime, sensor_source=sensors,

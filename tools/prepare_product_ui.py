@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install bounded product-only cooperative exits in pinned UiApp and Shell.
+"""Install product-only cooperative exits in the pinned UEFI user interfaces.
 
 All checkpoints use PianoProductPumpLib; legacy DSCs retain its Null binding.
 No reset, owner stop, ExitImage, synthetic key or console-cache operation is
@@ -18,6 +18,8 @@ SIMPLEINIT_PIN = SOURCE_PINS['simple-init']['commit']
 DISPLAY = BASE + 'MdeModulePkg/Universal/DisplayEngineDxe/'
 BROWSER = BASE + 'MdeModulePkg/Universal/SetupBrowserDxe/'
 UI = BASE + 'MdeModulePkg/Application/UiApp/'
+PICKER = BASE + 'MdeModulePkg/Application/BootManagerMenuApp/'
+BOOT_UI = BASE + 'MdeModulePkg/Library/BootManagerUiLib/'
 CDL = BASE + 'MdeModulePkg/Library/CustomizedDisplayLib/'
 SHELL = BASE + 'ShellPkg/Application/Shell/'
 UEFI_LIB = BASE + 'MdePkg/Library/UefiLib/'
@@ -261,8 +263,11 @@ hook(SI+'src/gui/drivers/uefi_gop.c', '\tuefigop_apply_mode();\n',
      '\t\t(unsigned long long)gop->Mode->FrameBufferBase,(unsigned long long)gop->Mode->FrameBufferSize,\n'
      '\t\tgop->Mode->Info->HorizontalResolution,gop->Mode->Info->VerticalResolution,\n'
      '\t\tgop->Mode->Info->PixelsPerScanLine,(unsigned)gop->Mode->Info->PixelFormat);\n')
-hook(SI+'src/gui/interface/core/bootmenu.c', '#include"gui/tools.h"\n',
-      '#include"gui/tools.h"\n#include"gui/msgbox.h"\n#include"piano_bootmenu.h"\n#ifdef ENABLE_UEFI\n#include<Library/PianoProductPumpLib.h>\n#endif\n')
+BOOTMENU_INCLUDE = '#include"gui/tools.h"\n'
+BOOTMENU_INCLUDES = (BOOTMENU_INCLUDE + '#include"gui/msgbox.h"\n#include"piano_bootmenu.h"\n'
+                     '#ifdef ENABLE_UEFI\n#include<Library/PianoProductPumpLib.h>\n'
+                     '#include"piano_product_runtime.h"\n#endif\n')
+hook(SI+'src/gui/interface/core/bootmenu.c', BOOTMENU_INCLUDE, BOOTMENU_INCLUDES)
 hook(SI+'src/gui/interface/core/bootmenu.c', '\tint timeout;\n',
      '\tint timeout;\n\tuint32_t auto_boot_at;\n\tbool auto_boot_started;\n')
 hook(SI+'src/gui/interface/core/bootmenu.c', '''static void bootmenu_auto_boot(struct bootmenu*bm){
@@ -292,11 +297,21 @@ hook(SI+'src/gui/interface/core/bootmenu.c', '''static void bootmenu_auto_boot(s
 		return;
 	}
 	if(bm->anim&&!bm->anim_done)return;
+	uint32_t now;
+	#if defined(ENABLE_UEFI) && defined(PIANO_PRODUCT_GUI_PUMP) && PIANO_PRODUCT_GUI_PUMP
+	if(!piano_product_gui_autoboot_tick(&now)){
+		lv_obj_set_hidden(bm->time,true);
+		lv_disp_trig_activity(NULL);
+		return;
+	}
+	#else
+	now=lv_tick_get();
+	#endif
 	if(!bm->auto_boot_started){
-		bm->auto_boot_at=lv_tick_get();
+		bm->auto_boot_at=now;
 		bm->auto_boot_started=true;
 	}
-	uint32_t elapsed=lv_tick_elaps(bm->auto_boot_at);
+	uint32_t elapsed=now-bm->auto_boot_at;
 	if(elapsed>=(uint32_t)bm->timeout*1000){
 		bootmenu_remove_auto_boot(bm);
 		bootmenu_click(&(lv_event_t){.user_data=bm});
@@ -370,6 +385,148 @@ hook(SI+'src/gui/interface/apps/uefi_shell.c', '\tif(id==0){\n\t\tMEDIA_FW_VOL_F
      '\t\t\treturn false;\n\t\t}\n'
      '\t\tMEDIA_FW_VOL_FILEPATH_DEVICE_PATH fn;')
 
+# The normal device picker gets the core's existing BootOrder. A selected
+# entry returns to the same core instead of launching a nested OS from UI.
+include(PICKER+'BootManagerMenu.c','#include "BootManagerMenu.h"\n')
+hook(PICKER+'BootManagerMenuApp.inf','[LibraryClasses]\n','[LibraryClasses]\n  PianoProductPumpLib\n')
+hook(PICKER+'BootManagerMenu.c',
+     '    if (ItemNum++ == SelectItem) {\n      EfiBootManagerBoot (&BootOptions[Index]);\n      break;\n    }\n  }\n',
+     '    if (ItemNum++ == SelectItem) {\n'
+     '      if (PianoProductRebootManaged ()) {\n'
+     '        if (BootOptions[Index].OptionNumber <= MAX_UINT16) {\n'
+     '          PianoProductSelectBootOption ((UINT16)BootOptions[Index].OptionNumber);\n'
+     '        }\n'
+     '      } else {\n'
+     '        EfiBootManagerBoot (&BootOptions[Index]);\n'
+     '      }\n'
+     '      break;\n'
+     '    }\n'
+     '  }\n')
+hook(PICKER+'BootManagerMenu.c',
+     '  ASSERT_EFI_ERROR (Status);\n'
+     '  if (CompareMem (BootOption->FilePath, ImageDevicePath, GetDevicePathSize (ImageDevicePath)) == 0) {\n',
+     '  ASSERT_EFI_ERROR (Status);\n'
+     '  if (PianoProductRebootManaged ()) {\n'
+     '    if (EFI_ERROR (Status) || !ImageDevicePath || !BootOption->FilePath) {\n'
+     '      return TRUE;\n'
+     '    }\n'
+     '    UINTN Size = GetDevicePathSize (ImageDevicePath);\n'
+     '    return (BOOLEAN)(\n'
+     '      !Size || !(BootOption->Attributes & LOAD_OPTION_ACTIVE) ||\n'
+     '      (BootOption->Attributes & LOAD_OPTION_HIDDEN) ||\n'
+     '      (BootOption->Attributes & LOAD_OPTION_CATEGORY) != LOAD_OPTION_CATEGORY_BOOT ||\n'
+     '      (GetDevicePathSize (BootOption->FilePath) == Size &&\n'
+     '       CompareMem (BootOption->FilePath, ImageDevicePath, Size) == 0)\n'
+     '      );\n'
+     '  }\n'
+     '  if (CompareMem (BootOption->FilePath, ImageDevicePath, GetDevicePathSize (ImageDevicePath)) == 0) {\n')
+hook(PICKER+'BootManagerMenu.c',
+     '                                            BootOption[Index].Description,\n'
+     '                                            NULL\n'
+     '                                            );\n'
+     '  }\n',
+     '                                            BootOption[Index].Description,\n'
+     '                                            NULL\n'
+     '                                            );\n'
+     '  }\n'
+     '  if (PianoProductRebootManaged () && StrIndex == 0) {\n'
+     '    FreePool (BootMenuData->PtrTokens);\n'
+     '    return EFI_NOT_FOUND;\n'
+     '  }\n')
+hook(PICKER+'BootManagerMenu.c','  EfiBootManagerConnectAll ();\n  EfiBootManagerRefreshAllBootOption ();\n',
+     '  if (!PianoProductRebootManaged ()) {\n'
+     '    EfiBootManagerConnectAll ();\n'
+     '    EfiBootManagerRefreshAllBootOption ();\n'
+     '  } else {\n'
+     '    // Do not treat the key that opened the list as a second Escape.\n'
+     '    gST->ConIn->Reset (gST->ConIn, FALSE);\n'
+     '  }\n')
+hook(PICKER+'BootManagerMenu.c',
+     '    DEBUG ((DEBUG_ERROR, "%a Failed InitializeBootMenuData %r\\n", __func__, Status));\n'
+     '    return EFI_NOT_FOUND;',
+     '    DEBUG ((DEBUG_ERROR, "%a Failed InitializeBootMenuData %r\\n", __func__, Status));\n'
+     '    BdsSetConsoleMode (FALSE);\n'
+     '    EfiBootManagerFreeLoadOptions (BootOption, BootOptionCount);\n'
+     '    HiiRemovePackages (gStringPackHandle);\n'
+     '    return EFI_NOT_FOUND;')
+hook(PICKER+'BootManagerMenu.c','    gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &Index);\n',
+     '    Status = gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &Index);\n'
+     '    if (EFI_ERROR (Status)) {\n'
+     '      if (PianoProductUiReturnRequested ()) {\n'
+     '        Status = EFI_SUCCESS;\n'
+     '      }\n'
+     '      BdsSetConsoleMode (FALSE);\n'
+     '      break;\n'
+     '    }\n')
+hook(PICKER+'BootManagerMenu.c',
+     '          BootFromSelectOption (BootOption, BootOptionCount, BootMenuData.SelectItem);\n',
+     '          BootFromSelectOption (BootOption, BootOptionCount, BootMenuData.SelectItem);\n'
+     '          if (PianoProductUiReturnRequested ()) {\n'
+     '            ExitApplication = TRUE;\n'
+     '            break;\n'
+     '          }\n')
+
+# Do not list the running menu as one of its own child boot options.
+for path in (SI+'src/boot/bootdef.c', SI+'src/boot/uefi_option.c',
+             SI+'src/gui/interface/apps/uefi_bootmenu.c'):
+    include(path,'#include<Library/UefiBootManagerLib.h>\n')
+hook(SI+'src/boot/SimpleInitBoot.inf','[LibraryClasses]\n','[LibraryClasses]\n  PianoProductPumpLib\n')
+hook(SI+'src/boot/bootdef.c','static void load_uefi_boot(){\n\tUINTN cnt=0,i=0;\n',
+     'static void load_uefi_boot(){\n\tUINTN cnt=0,i=0;\n\tbool found=false;\n')
+hook(SI+'src/boot/bootdef.c','\telse for(i=0;i<cnt;i++){\n\t\tCopyMem(opt,def,sizeof(struct boot_config));',
+     '\telse for(i=0;i<cnt;i++){\n'
+     '\t\tif(PianoProductIsSimpleInitOption(bo[i].FilePath))continue;\n'
+     '\t\tfound=true;\n'
+     '\t\tCopyMem(opt,def,sizeof(struct boot_config));')
+hook(SI+'src/boot/bootdef.c','\tconfd_set_boolean("boot.configs.uefi-bootmenu.show",true);\n',
+     '\tconfd_set_boolean("boot.configs.uefi-bootmenu.show",found);\n')
+hook(SI+'src/boot/uefi_option.c','\t\tEfiBootManagerBoot(&bo[i]);\n\t\treturn 0;',
+     '\t\tif(PianoProductRebootManaged()){\n'
+     '\t\t\tEFI_STATUS status=PianoProductIsSimpleInitOption(bo[i].FilePath)?EFI_ACCESS_DENIED:\n'
+     '\t\t\t\tPianoProductSelectBootOption((UINT16)opt);\n'
+     '\t\t\tEfiBootManagerFreeLoadOptions(bo,cnt);\n'
+     '\t\t\tif(EFI_ERROR(status))ERET(EIO);\n'
+     '\t\t}else EfiBootManagerBoot(&bo[i]);\n'
+     '\t\treturn 0;')
+hook(SI+'src/gui/interface/apps/uefi_bootmenu.c','\tUINTN cnt=0,i=0;\n',
+     '\tUINTN cnt=0,i=0,shown=0;\n')
+hook(SI+'src/gui/interface/apps/uefi_bootmenu.c',
+     '\t\tstruct option_info*k=&options[i];\n\t\tEFI_BOOT_MANAGER_LOAD_OPTION*b=&bo[i];\n',
+     '\t\tEFI_BOOT_MANAGER_LOAD_OPTION*b=&bo[i];\n'
+     '\t\tif(PianoProductIsSimpleInitOption(b->FilePath))continue;\n'
+     '\t\tstruct option_info*k=&options[shown++];\n')
+hook(SI+'src/gui/interface/apps/uefi_bootmenu.c',
+     '\t\tif(i>=256){\n\t\t\ttlog_warn("options too many, only show 256 options");\n\t\t\tbreak;\n\t\t}\n',
+     '\t\tif(shown==ARRAY_SIZE(options))break;\n')
+hook(SI+'src/gui/interface/apps/uefi_bootmenu.c',
+     '\ttlog_info("found %llu options",(unsigned long long)i);\n',
+     '\tif(bo&&cnt&&!shown)bootmenu_set_options_info(_("No options found"));\n'
+     '\ttlog_info("found %llu options",(unsigned long long)shown);\n')
+hook(SI+'src/gui/interface/apps/uefi_bootmenu.c','\tEfiBootManagerBoot(cur);\n',
+     '\tif(PianoProductRebootManaged()){\n'
+     '\t\tif(cur->OptionNumber>MAX_UINT16||PianoProductIsSimpleInitOption(cur->FilePath))return -1;\n'
+     '\t\treturn EFI_ERROR(PianoProductSelectBootOption((UINT16)cur->OptionNumber))?-1:0;\n'
+     '\t}\n'
+     '\tEfiBootManagerBoot(cur);\n')
+
+include(BOOT_UI+'BootManager.c','#include "BootManager.h"\n')
+hook(BOOT_UI+'BootManagerUiLib.inf','[LibraryClasses]\n','[LibraryClasses]\n  PianoProductPumpLib\n')
+hook(BOOT_UI+'BootManager.c',
+     '  if (BootOption == NULL) {\n    return EFI_UNSUPPORTED;\n  }\n',
+     '  if (BootOption == NULL) {\n    return EFI_UNSUPPORTED;\n  }\n'
+     '  if (PianoProductRebootManaged ()) {\n'
+     '    EFI_STATUS ProductStatus = EFI_NOT_FOUND;\n'
+     '    if (QuestionId && QuestionId <= BootOptionCount &&\n'
+     '        BootOption[QuestionId - 1].OptionNumber <= MAX_UINT16) {\n'
+     '      ProductStatus = PianoProductSelectBootOption ((UINT16)BootOption[QuestionId - 1].OptionNumber);\n'
+     '    }\n'
+     '    EfiBootManagerFreeLoadOptions (BootOption, BootOptionCount);\n'
+     '    if (ProductStatus == EFI_SUCCESS) {\n'
+     '      *ActionRequest = EFI_BROWSER_ACTION_REQUEST_EXIT;\n'
+     '    }\n'
+     '    return ProductStatus;\n'
+     '  }\n')
+
 RESET_LIB=BASE+'ShellPkg/Library/UefiShellLevel2CommandsLib/'
 include(RESET_LIB+'Reset.c', '#include "UefiShellLevel2CommandsLib.h"\n')
 hook(RESET_LIB+'UefiShellLevel2CommandsLib.inf','[LibraryClasses]\n','[LibraryClasses]\n  PianoProductPumpLib\n')
@@ -439,7 +596,7 @@ def prepare(root=ROOT, apply=False, check_pins=True):
             newline[path]=b'\r\n' if b'\r\n' in raw else b'\n'
             desired[path]=raw.decode().replace('\r\n','\n')
             if relative==SI+'src/gui/interface/core/bootmenu.c' and previous_menu_include in desired[path]:
-                desired[path]=desired[path].replace(previous_menu_include,previous_menu_include.replace('#include"gui/msgbox.h"\n','#include"gui/msgbox.h"\n#include"piano_bootmenu.h"\n'),1)
+                desired[path]=desired[path].replace(previous_menu_include,BOOTMENU_INCLUDES,1)
             if relative==SI+'src/gui/interface/core/bootmenu.c':
                 desired[path]=desired[path].replace('"piano-setup"','"setup"').replace('"piano-stable"','"linux"').replace('"piano-shell"','"shell"').replace('未能返回 Android，请稍后重试。','未能重启，请稍后重试。')
             if relative==SI+'src/lib/reboot.c':

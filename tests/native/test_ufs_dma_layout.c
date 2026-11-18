@@ -45,6 +45,29 @@ int main(void){
   assert(PianoUfsBuildReadCommand(trd,32,ucd,1024,0x40001000,0x40002000,4096,11,0,PianoUfsReadLba10,1,1)==EFI_SUCCESS);
   assert(ucd[16]==0x28 && ucd[21]==1 && ucd[24]==1);
   assert(PianoUfsBuildReadCommand(trd,32,ucd,1024,0x40001000,0x40002000,4096,11,8,PianoUfsReadLba10,0,1)==EFI_INVALID_PARAMETER);
+  assert(PianoUfsBuildReadCommand(trd,32,ucd,1024,0x40001000,0x40002000,PIANO_UFS_PRDT_MAX_DATA_BYTES,
+    11,0,PianoUfsReadLba10,MAX_UINT32-63,64)==EFI_SUCCESS);
+  assert(ucd[23]==0 && ucd[24]==64 && ucd[13]==4 && ucd[14]==0 && ucd[15]==0);
+  assert(ucd[268]==0xff && ucd[269]==0xff && ucd[270]==3 && ucd[271]==0);
+  assert(PianoUfsBuildReadCommand(trd,32,ucd,1024,0x40001000,0x40002000,PIANO_UFS_PRDT_MAX_DATA_BYTES,
+    11,0,PianoUfsReadLba10,MAX_UINT32-62,64)==EFI_INVALID_PARAMETER);
+  CONST UINT64 Base=0xfffc0000ULL;
+  CONST UINT32 Span=3*PIANO_UFS_PRDT_MAX_DATA_BYTES+4096;
+  assert(PianoUfsBuildReadCommand(trd,32,ucd,1024,0x40001000,Base,Span,
+    11,0,PianoUfsReadLba10,0,193)==EFI_SUCCESS);
+  assert(ReadLe32(trd+28)==0x00400004 && ReadBe32(ucd+12)==Span && ucd[24]==193);
+  assert(ReadLe32(ucd+256)==0xfffc0000 && ReadLe32(ucd+260)==0 && ReadLe32(ucd+268)==0x3ffff);
+  assert(ReadLe32(ucd+272)==0 && ReadLe32(ucd+276)==1 && ReadLe32(ucd+284)==0x3ffff);
+  assert(ReadLe32(ucd+304)==0x80000 && ReadLe32(ucd+308)==1 && ReadLe32(ucd+316)==4095);
+  assert(PianoUfsDataLayoutMatches(trd,ucd,Base,Span));
+  ++ucd[284];assert(!PianoUfsDataLayoutMatches(trd,ucd,Base,Span));--ucd[284];
+  ++ucd[288];assert(!PianoUfsDataLayoutMatches(trd,ucd,Base,Span));--ucd[288];
+  --trd[28];assert(!PianoUfsDataLayoutMatches(trd,ucd,Base,Span));
+  assert(PianoUfsBuildReadCommand(trd,32,ucd,1024,0x40001000,0x40002000,PIANO_UFS_MAX_TRANSFER_BYTES+4096,
+    11,0,PianoUfsReadLba10,0,257)==EFI_INVALID_PARAMETER);
+  assert(PianoUfsBuildReadCommand(trd,32,ucd,1024,0x40001000,0x40002000,65536,
+    11,0,PianoUfsModeSense10,0,0)==EFI_INVALID_PARAMETER);
+  assert(PianoUfsBuildReadCommand(trd,32,ucd,1024,0x40001000,0x40002000,4096,11,0,PianoUfsReadLba10,1,1)==EFI_SUCCESS);
   UINT32 transferred;UINT8 *r=ucd+64;Le32(trd+8,0);ZeroMem(r,64);r[0]=0x21;r[3]=11;
   assert(PianoUfsCheckReadResponse(trd,ucd,11,4096,&transferred)==EFI_SUCCESS && transferred==4096);
   r[1]=0x20;Be32(r+12,4000);

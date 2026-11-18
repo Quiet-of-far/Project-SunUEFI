@@ -42,11 +42,25 @@
       "mode": "0644",
       "uid": 0,
       "gid": 0,
-      "sha256": "fd92190d4d6336e8ca45f0c2cf0218a793e63fdb1f7dea9acf3197185e8b428f",
+      "sha256": "e996b874dbac3a387db4addbe639833b859a6d3a04cef16a347cf37c7b672278",
       "source": "linux/bsp/common/usr/lib/systemd/system/piano-touch.service",
-      "source_sha256": "fd92190d4d6336e8ca45f0c2cf0218a793e63fdb1f7dea9acf3197185e8b428f",
+      "source_sha256": "e996b874dbac3a387db4addbe639833b859a6d3a04cef16a347cf37c7b672278",
       "source_git_mode": "100644",
       "license": "MIT",
+      "source_component": "Project SunUEFI"
+    },
+    {
+      "group": "common",
+      "path": "usr/lib/piano/pen-control.py",
+      "type": "file",
+      "mode": "0755",
+      "uid": 0,
+      "gid": 0,
+      "sha256": "1cdb4d11578615adfca0f3f9b092c80bad809e969ef9d591dd03112ba43283c5",
+      "source": "linux/bsp/common/usr/lib/piano/pen-control.py",
+      "source_sha256": "1cdb4d11578615adfca0f3f9b092c80bad809e969ef9d591dd03112ba43283c5",
+      "source_git_mode": "100755",
+      "license": "BSD-2-Clause-Patent",
       "source_component": "Project SunUEFI"
     },
     {
@@ -65,7 +79,7 @@
       "patch_sha256": "078e3f8a45de49dabb7d620c510f7ee2bba8a761efc8bcb0b99d686a03d55a6f",
       "derived_from": {
         "path": "patches/linux/7.3/0005-audio.patch",
-        "sha256": "191b05b323cca594c3f9e40efc7d6ed696cc7a1a9926f1f336ee9632c27e490c",
+        "patch_id": "1da2380da2ca6f1452f13470c45c49c3385e78e4",
         "scope": "CaptureChannels 1 requires the Piano-specific VA mono FE/BE kernel route"
       }
     },
@@ -142,12 +156,12 @@
       "mode": "0644",
       "uid": 0,
       "gid": 0,
-      "sha256": "ae688c29d6210ffff09212daf9f2079e0a7d000cc3ffcd52870671d2d2108ee0",
+      "sha256": "f206c672be3a2df3349187800bd1ced5191fc7634734cdd3a0c22f2bb80200be",
       "source": "LICENSE",
       "source_sha256": "8b6c78d2205c89d079a36c1810b17b3db44f063f2602341ea25051528a054eca",
       "source_git_mode": "100644",
-      "license": "MIT",
-      "transformation": "Public source URL/pin notice plus unmodified LICENSE text"
+      "license": "MIT AND BSD-2-Clause-Patent",
+      "transformation": "Public source notice and LICENSE text, with separate terms for pen control"
     },
     {
       "group": "common",
@@ -286,8 +300,8 @@
       "source_component": "Project SunUEFI",
       "source_git_mode": "100644",
       "license": "MIT",
-      "sha256": "3ebb8173db88496fdaa23c42e635defcbe5784f6f51aa538a76a9b9808b220ff",
-      "source_sha256": "3ebb8173db88496fdaa23c42e635defcbe5784f6f51aa538a76a9b9808b220ff"
+      "sha256": "13001fcc77d4a1823b7c43e93f808e8294527636f50fc15d4876fa95f8816664",
+      "source_sha256": "13001fcc77d4a1823b7c43e93f808e8294527636f50fc15d4876fa95f8816664"
     },
     {
       "group": "common",
@@ -296,9 +310,9 @@
       "mode": "0644",
       "uid": 0,
       "gid": 0,
-      "sha256": "cfd6d1b0e57e806f6aa2e0722ce6bd0f581efeab242a26aa6f525291b78e885c",
+      "sha256": "57d8469154f538d25f6c34edaa78b6a569cb3e5d08bcde6b2302b1e02eee6016",
       "source": "linux/bsp/common/etc/udev/rules.d/79-piano-touch.rules",
-      "source_sha256": "cfd6d1b0e57e806f6aa2e0722ce6bd0f581efeab242a26aa6f525291b78e885c",
+      "source_sha256": "57d8469154f538d25f6c34edaa78b6a569cb3e5d08bcde6b2302b1e02eee6016",
       "source_component": "Project SunUEFI",
       "source_git_mode": "100644",
       "license": "MIT"
@@ -344,6 +358,34 @@
       "license": "MIT",
       "sha256": "434ad6607f2965b17243536eeb37b1f8becd6b1ed457dcccbdb46101de2d5eba",
       "source_sha256": "434ad6607f2965b17243536eeb37b1f8becd6b1ed457dcccbdb46101de2d5eba"
+    },
+    {
+      "group": "common",
+      "path": "usr/lib/firmware/novatek/piano-boe-pen.ini",
+      "type": "symlink",
+      "mode": "0777",
+      "uid": 0,
+      "gid": 0,
+      "sha256": "3322ee6e7b6d103cc4c63dae919a1890d3d38a359429ddbc7c25ad76c59f5865",
+      "source": "linux/bsp/common/usr/lib/firmware/novatek/piano-boe-pen.ini",
+      "source_component": "Project SunUEFI numeric calibration facts",
+      "source_sha256": "3322ee6e7b6d103cc4c63dae919a1890d3d38a359429ddbc7c25ad76c59f5865",
+      "source_git_mode": "120000",
+      "license": "MIT"
+    },
+    {
+      "group": "common",
+      "path": "usr/lib/firmware/novatek/piano-csot-pen.ini",
+      "type": "symlink",
+      "mode": "0777",
+      "uid": 0,
+      "gid": 0,
+      "sha256": "8d157cd6d2d1856246f78ed48a9d46fee0f4c3a38bee95b9fc7faf583f3e6af1",
+      "source": "linux/bsp/common/usr/lib/firmware/novatek/piano-csot-pen.ini",
+      "source_component": "Project SunUEFI numeric calibration facts",
+      "source_sha256": "8d157cd6d2d1856246f78ed48a9d46fee0f4c3a38bee95b9fc7faf583f3e6af1",
+      "source_git_mode": "120000",
+      "license": "MIT"
     }
   ],
   "excluded": [

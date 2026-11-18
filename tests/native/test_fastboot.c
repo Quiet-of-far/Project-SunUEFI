@@ -14,9 +14,7 @@ INTN EFIAPI AsciiStrCmp(CONST CHAR8 *A,CONST CHAR8 *B){return strcmp(A,B);}
 INTN EFIAPI AsciiStrnCmp(CONST CHAR8 *A,CONST CHAR8 *B,UINTN N){return strncmp(A,B,N);}
 VOID *EFIAPI CopyMem(VOID *A,CONST VOID *B,UINTN N){return memcpy(A,B,N);}
 VOID *EFIAPI ZeroMem(VOID *A,UINTN N){return memset(A,0,N);}
-#if PIANO_USB_RAM_BOOT
 INTN EFIAPI CompareMem(CONST VOID *A,CONST VOID *B,UINTN N){return memcmp(A,B,N);}
-#endif
 VOID *EFIAPI AllocateZeroPool(UINTN N){
   if(fail_alloc)return NULL;
   for(unsigned i=0;i<16;++i)if(!pools[i].pointer){pools[i].pointer=calloc(1,N);pools[i].bytes=N;
@@ -82,16 +80,19 @@ static void diagnostics_only(void){
   command(&S,"download:00000003","DATA00000003");
   assert(PianoFastbootPacket(&S,"abc",3)==EFI_SUCCESS && S.Complete && S.UploadBorrowed);
   assert(PianoFastbootStageCopy(&S,"other",5)==EFI_SUCCESS);
-  assert(PianoFastbootRestrictToDiagnostics(NULL)==EFI_INVALID_PARAMETER);
+  assert(PianoFastbootRestrictToDiagnostics(NULL,TRUE)==EFI_INVALID_PARAMETER);
   for(unsigned i=0;i<3;++i){
     S.BootPreparing=i==0;S.BootPending=i==1;S.BootTransferFrozen=i==2;
-    assert(PianoFastbootRestrictToDiagnostics(&S)==EFI_NOT_READY && !S.DiagnosticsOnly && S.Download && S.Upload);
+    assert(PianoFastbootRestrictToDiagnostics(&S,TRUE)==EFI_NOT_READY && !S.DiagnosticsOnly && S.Download && S.Upload);
   }
   S.BootPreparing=S.BootPending=S.BootTransferFrozen=FALSE;
   S.RebootRequested=S.ExitRequested=TRUE;
-  assert(PianoFastbootRestrictToDiagnostics(&S)==EFI_SUCCESS && S.DiagnosticsOnly && !allocation);
+  assert(PianoFastbootRestrictToDiagnostics(&S,TRUE)==EFI_SUCCESS && S.DiagnosticsOnly && !allocation);
   assert(!S.Download && !S.Upload && !S.Receiving && !S.Complete && !S.RebootRequested && !S.ExitRequested);
   S.Diagnostic=diagnostic_reply;
+  command(&S,"oem help","OKAY");
+  assert(calls==9 && !strcmp(replies[0],"INFOUEFI Fastboot commands:"));
+  for(unsigned i=0;i<calls;++i)assert(!strstr(replies[i],"stage FILE")&&!strstr(replies[i],"fetch PARTITION"));
   command(&S,"getvar:version","OKAY0.4");
   command(&S,"getvar:max-download-size","OKAY0x00000000");
   command(&S,"getvar:max-fetch-size","FAILstorage backend not ready");
@@ -99,25 +100,30 @@ static void diagnostics_only(void){
   command(&S,"getvar:SunUEFI:ram-boot","OKAYdisabled");
   command(&S,"getvar:all","OKAY");assert(calls==5 && !strcmp(replies[3],"INFOmax-download-size:0x00000000"));
   unsigned StorageQueries=storage_queries,BootQueries=boot_queries;
-  const char *Blocked[]={"download:00000003","fetch:xbl_config_a:0x0:0x1","boot","reboot","continue", "oem setup","oem shell","oem simpleinit","oem boot-stable","oem sha256","oem discard","oem log","flash:boot_a"};
+  const char *Blocked[]={"download:00000003","fetch:xbl_config_a:0x0:0x1","boot", "oem setup","oem shell","oem simpleinit","oem boot-stable","oem sha256","oem discard","oem log","flash:boot_a"};
   for(unsigned i=0;i<sizeof(Blocked)/sizeof(Blocked[0]);++i)
     command(&S,Blocked[i],"FAILonly diagnostics available after boot failure");
   assert(storage_queries==StorageQueries && boot_queries==BootQueries && !diagnostic_calls && !allocation);
   assert(storage_queries==2 && boot_queries==(PIANO_USB_RAM_BOOT?1U:0U));
   command(&S,"oem status","OKAY");command(&S,"oem ramlog","OKAY");
   UINT8 *Upload=S.Upload;
-  assert(PianoFastbootRestrictToDiagnostics(&S)==EFI_SUCCESS && S.Upload==Upload);
+  assert(PianoFastbootRestrictToDiagnostics(&S,TRUE)==EFI_SUCCESS && S.Upload==Upload);
   command(&S,"upload","OKAY");assert(calls==3 && !strcmp(replies[1],"frozen"));
   command(&S,"oem screenshot","OKAY");command(&S,"upload","OKAY");assert(diagnostic_calls==3);
   PianoFastbootReset(&S);assert(S.DiagnosticsOnly && !S.Upload && !allocation);
   command(&S,"download:00000003","FAILonly diagnostics available after boot failure");
-  command(&S,"reboot","FAILonly diagnostics available after boot failure");
-  assert(!S.RebootRequested && !S.ExitRequested && !S.Receiving);
+  command(&S,"reboot","OKAY");
+  assert(S.RebootRequested && !S.ExitRequested && !S.Receiving);
+  PianoFastbootReset(&S);
+  command(&S,"continue","OKAY");assert(S.ExitRequested && !S.RebootRequested);
+  PianoFastbootReset(&S);
   // A partial host download is discarded before command parsing resumes.
   assert(PianoFastbootInit(&S,(VOID *)123,send_reply,NULL)==EFI_SUCCESS);
   command(&S,"download:00000003","DATA00000003");
   assert(PianoFastbootPacket(&S,"a",1)==EFI_SUCCESS && S.Receiving);
-  assert(PianoFastbootRestrictToDiagnostics(&S)==EFI_SUCCESS && !S.Receiving && !allocation);
+  assert(PianoFastbootRestrictToDiagnostics(&S,FALSE)==EFI_SUCCESS && !S.Receiving && !allocation);
+  command(&S,"reboot","FAILresource cleanup incomplete; read logs and hold power");
+  assert(!S.RebootRequested);
   command(&S,"getvar:version","OKAY0.4");
 }
 int main(void){
@@ -125,13 +131,17 @@ int main(void){
   assert(PianoFastbootInit(NULL,NULL,send_reply,NULL)==EFI_INVALID_PARAMETER);
   assert(PianoFastbootInit(&S,(void *)123,NULL,NULL)==EFI_INVALID_PARAMETER);
   assert(PianoFastbootInit(&S,(void *)123,send_reply,log_reply)==EFI_SUCCESS);
+  command(&S,"oem help","OKAY");
+  assert(calls==12 && !strcmp(replies[8],"INFOstage FILE - download a RAM payload (max 64 MiB)"));
   command(&S,"getvar:version","OKAY0.4");
   command(&S,"getvar:SunUEFI:ram-boot","OKAYdisabled");
   command(&S,"getvar:version-malicious","FAILunknown variable");
   command(&S,"getvar:all","OKAY");assert(calls==5);
-  const char *blocked[]={"flash:boot_a","erase:userdata","flashing unlock","oem unlock",
+  command(&S,"flash:boot_a","FAILstorage write backend not ready");
+  command(&S,"erase:userdata","FAILstorage write backend not ready");
+  const char *blocked[]={"flashing unlock","oem unlock",
     "set_active:b","oem edl","reboot-edl","reboot-bootloader","oem poke 1 2",
-    "flash:qupfw_a","update-super:super","snapshot-update:merge","format:userdata"};
+    "update-super:super","snapshot-update:merge","format:userdata"};
   for(size_t i=0;i<sizeof(blocked)/sizeof(blocked[0]);++i)
     command(&S,blocked[i],"FAILcommand disabled by RAM-only policy");
   const char *bad[]={"download:","download:0000000g","download:000000001",

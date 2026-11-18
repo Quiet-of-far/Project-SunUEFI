@@ -5,6 +5,7 @@ Prepared snapshots stay immutable. Only the locked build-owned compiler checkout
 is switched; no rescue-pin, guest, device or partition operation.
 """
 import argparse
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
@@ -18,6 +19,7 @@ import uuid
 
 from build_kernel import image_info
 from prepare_linux_modules import modinfo
+from prepare_release_kernel import release_series
 from desktop import prepare_kernel_llvm
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -31,7 +33,7 @@ SOURCE_PINS={'arch/arm64/configs/piano_defconfig':'0525361e8c96891c3462ad8a081ec
 REQUIRED={
  'MODULES':'y','BLK_DEV_INITRD':'y','EFI':'y','EFI_STUB':'y','CMDLINE_FORCE':'n',
  'DRM_MSM':'m','ARM_SMMU':'m','QCOM_Q6V5_PAS':'m','DRM_SIMPLEDRM':'y','DRM_PANEL_NOVATEK_NT36532':'m',
- 'VIDEO_QCOM_CAMSS':'m','VIDEO_OV32D40':'m','VIDEO_S5KJN1':'m','VIDEO_DW9768':'m','VIDEO_QCOM_IRIS':'m',
+ 'VIDEO_QCOM_CAMSS':'m','VIDEO_OV32D40':'m','VIDEO_S5KJN1':'m','VIDEO_GT9764':'m','VIDEO_QCOM_IRIS':'m',
  'SND_SOC_SC8280XP':'m','SND_SOC_QDSP6':'m','SND_SOC_FS19XX':'m','QCOM_FASTRPC':'m',
  'BATTERY_PIANO_MCA':'m','CHARGER_SC8541':'m','QCOM_PMIC_GLINK':'m','POWER_RESET_PIANO':'y',
  'QCOM_SPMI_ADC5_GEN3':'y','BATTERY_BQ27XXX_IIO':'y',
@@ -52,6 +54,12 @@ BLUETOOTH_OVERRIDES={'CONFIG_UHID':'m','CONFIG_HID_XIAOMI':'m',
                     'CONFIG_BT_RFCOMM':'m','CONFIG_BT_RFCOMM_TTY':'y','CONFIG_BT_BNEP':'m'}
 FILESYSTEM_OVERRIDES={'CONFIG_EXFAT_FS':'y','CONFIG_NTFS3_FS':'y',
                       'CONFIG_NTFS3_LZX_XPRESS':'y','CONFIG_NLS_UTF8':'y'}
+GAMEPAD_OVERRIDES={
+    'CONFIG_INPUT_JOYSTICK':'y','CONFIG_INPUT_JOYDEV':'m',
+    'CONFIG_JOYSTICK_XPAD':'m','CONFIG_JOYSTICK_XPAD_FF':'y','CONFIG_JOYSTICK_XPAD_LEDS':'y',
+    'CONFIG_HID_MICROSOFT':'m','CONFIG_HID_NINTENDO':'m','CONFIG_NINTENDO_FF':'y',
+    'CONFIG_HID_PLAYSTATION':'m','CONFIG_PLAYSTATION_FF':'y','CONFIG_HID_SONY':'m','CONFIG_SONY_FF':'y',
+}
 PEN_DOCK_OVERRIDES={'CONFIG_INPUT_XIAOMI_PIANO_PEN_DOCK':'m', 'CONFIG_CHARGER_SC96231':'m'}
 IR_OVERRIDES={'CONFIG_LIRC':'y','CONFIG_IR_SPI':'m'}
 USERSPACE_SECURITY_OVERRIDES={'CONFIG_SECURITY_LANDLOCK':'y'}
@@ -88,7 +96,7 @@ PLATFORM_OVERRIDES.update({
 PLATFORM_OVERRIDES.update({key: 'y' for key in (
     'CONFIG_NF_TABLES_INET', 'CONFIG_NF_CONNTRACK_MARK', 'CONFIG_NF_CONNTRACK_ZONES')})
 PLATFORM_OVERRIDES.update({key: 'm' for key in (
-    'CONFIG_BATTERY_PIANO',
+    'CONFIG_BATTERY_PIANO', 'CONFIG_VIDEO_GT9764',
     'CONFIG_UIO', 'CONFIG_UIO_PIANO_FINGERPRINT',
     'CONFIG_NF_TABLES', 'CONFIG_NFT_CT', 'CONFIG_NFT_LOG', 'CONFIG_NFT_LIMIT',
     'CONFIG_NFT_MASQ', 'CONFIG_NFT_REDIR', 'CONFIG_NFT_NAT',
@@ -98,13 +106,76 @@ PLATFORM_OVERRIDES.update({key: 'm' for key in (
 PLATFORM_OVERRIDES.update({'CONFIG_FTRACE': 'y', 'CONFIG_ENABLE_DEFAULT_TRACERS': 'y'})
 PLATFORM_OVERRIDES.update({'CONFIG_ANDROID_BINDER_IPC': 'y', 'CONFIG_ANDROID_BINDERFS': 'y',
                            'CONFIG_ANDROID_BINDER_DEVICES': '"binder,hwbinder,vndbinder"'})
-ALLOWED_OVERRIDES={**BLUETOOTH_OVERRIDES,**FILESYSTEM_OVERRIDES,**PEN_DOCK_OVERRIDES,**IR_OVERRIDES,**FLASH_OVERRIDES,**EARLY_CPUCP_OVERRIDES,
+ALLOWED_OVERRIDES={**BLUETOOTH_OVERRIDES,**FILESYSTEM_OVERRIDES,**GAMEPAD_OVERRIDES,**PEN_DOCK_OVERRIDES,**IR_OVERRIDES,**FLASH_OVERRIDES,**EARLY_CPUCP_OVERRIDES,
                    **USERSPACE_SECURITY_OVERRIDES,**SLEEP_OVERRIDES,**PM_DEBUG_OVERRIDES,**PLATFORM_OVERRIDES}
 
 
 def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 def text(argv,cwd=None,env=None):return subprocess.check_output([str(x)for x in argv],cwd=cwd,env=env,text=True).strip()
 def run(argv,cwd=None,env=None):subprocess.run([str(x)for x in argv],cwd=cwd,env=env,check=True)
+
+
+def release_kernel_policy(root=None):
+    root=ROOT if root is None else Path(root)
+    policy=json.loads((root/'config/release.json').read_text())['kernel']
+    if not isinstance(policy,dict):
+        raise ValueError('Release kernel policy must be an object')
+    abi=policy.get('abi_epoch')
+    package=policy.get('package_epoch')
+    if type(abi) is not int or type(package) is not int or not 0<abi<=package:
+        raise ValueError('Set kernel abi_epoch and package_epoch in config/release.json; '
+                         'package_epoch must not precede abi_epoch')
+    return policy
+
+
+def kernel_policy_identity(root=None, *, with_packages=False):
+    policy=release_kernel_policy(root)
+    if not with_packages:
+        del policy['package_epoch']
+    encoded=json.dumps(policy,sort_keys=True,separators=(',',':')).encode()
+    return {'policy':policy,'sha256':hashlib.sha256(encoded).hexdigest()}
+
+
+def kernel_policy_matches(record,identity):
+    return (record.get('kernel_policy')==identity['policy'] and
+            record.get('kernel_policy_sha256')==identity['sha256'])
+
+
+def kernel_abi_suffix(epoch,tree,config_hash,inputs,tool_hashes):
+    record={'source_tree':tree,'config_sha256':config_hash,
+            'build_inputs':inputs,'build_tools':tool_hashes}
+    encoded=json.dumps(record,sort_keys=True,separators=(',',':')).encode()
+    return f'-b{epoch}-g{hashlib.sha256(encoded).hexdigest()[:12]}'
+
+
+def kernel_build_environment(epoch):
+    timestamp=datetime.fromtimestamp(epoch,timezone.utc).isoformat()
+    return {'KBUILD_BUILD_USER':'sunuefi','KBUILD_BUILD_HOST':'builder',
+            'KBUILD_BUILD_VERSION':'1','KBUILD_BUILD_TIMESTAMP':timestamp,
+            'SOURCE_DATE_EPOCH':str(epoch)}
+
+
+def kernel_release_matches(record,out):
+    try:
+        release=record['kernel_release']
+        suffix=kernel_abi_suffix(record['kernel_policy']['abi_epoch'],record['source_tree'],
+                                 record['config_sha256'],record['inputs'],record['toolchain']['sha256'])
+    except KeyError:
+        return False
+    path=out/'include/config/kernel.release'
+    return release.endswith(suffix) and path.is_file() and path.read_text().strip()==release
+
+
+def matching_build(previous,commit,hashes,policy,modules,root_policy,root_command,tools,out):
+    return (previous.get('status')=='HOST_BUILT_FULL_CANDIDATE_NOT_HARDWARE_VERIFIED' and
+            previous.get('source_commit')==commit and previous.get('inputs')==hashes and
+            kernel_policy_matches(previous,policy) and
+            previous.get('local_module_overrides')==modules and previous.get('root_policy')==root_policy and
+            previous.get('command_line')==root_command and previous.get('toolchain',{}).get('sha256')==tools['sha256'] and
+            (out/'.config').is_file() and sha(out/'.config')==previous.get('config_sha256') and
+            (out/'Module.symvers').is_file() and (out/'include/config/kernel.release').is_file() and
+            previous.get('module_symvers_sha256')==sha(out/'Module.symvers') and
+            kernel_release_matches(previous,out))
 
 
 def config_values(raw):
@@ -134,6 +205,7 @@ def command_line(root_policy):
 def module_overrides(fragment,kind='bluetooth'):
     lines=[line.strip()for line in fragment.splitlines()if line.strip()and not line.lstrip().startswith('#')]
     expected=BLUETOOTH_OVERRIDES if kind=='bluetooth'else FILESYSTEM_OVERRIDES if kind=='filesystem'else PEN_DOCK_OVERRIDES if kind=='pen-dock'else IR_OVERRIDES if kind=='ir'else FLASH_OVERRIDES if kind=='flash'else EARLY_CPUCP_OVERRIDES if kind=='early-cpucp'else USERSPACE_SECURITY_OVERRIDES if kind=='userspace-security'else SLEEP_OVERRIDES if kind=='sleep'else PLATFORM_OVERRIDES if kind=='platform'else None
+    if kind=='gamepad':expected=GAMEPAD_OVERRIDES
     if expected is None or len(lines)!=len(expected) or set(lines)!={key+'='+value for key,value in expected.items()}:raise ValueError('Unexpected '+kind+' configuration fragment')
     return dict(expected)
 
@@ -154,18 +226,17 @@ def verify_source(work=WORK,commit=None):
     commit=COMMIT if commit is None else commit
     if not re.fullmatch(r'[0-9a-f]{40}',commit):raise ValueError('Exact canonical full kernel commit required')
     if text(['git','rev-parse','HEAD'],work)!=commit:raise ValueError('Full candidate source HEAD drifted')
-    policy=json.loads((ROOT/'config/release.json').read_text())['kernel']
+    series=release_series(ROOT,json.loads((ROOT/'config/release.json').read_text())['kernel'])
     tree=text(['git','rev-parse','HEAD^{tree}'],work)
-    if tree==policy['target_tree']:
-        base=policy['base_commit']
+    if tree==series['target_tree']:
+        base=series['base_commit']
     else:
         base=COMMIT
-        series=json.loads((ROOT/policy['patch_series']).read_text())
         target=series['original_target_commit']
         target_tree=subprocess.run(['git','rev-parse',target+'^{tree}'],cwd=work,capture_output=True,text=True)
-        if target_tree.returncode==0 and target_tree.stdout.strip()==policy['target_tree'] and \
+        if target_tree.returncode==0 and target_tree.stdout.strip()==series['target_tree'] and \
            subprocess.run(['git','merge-base','--is-ancestor',target,commit],cwd=work,capture_output=True).returncode==0:
-            base=policy['base_commit']
+            base=series['base_commit']
     if commit!=base and subprocess.run(['git','merge-base','--is-ancestor',base,commit],cwd=work,capture_output=True).returncode:
         raise ValueError('Kernel source does not descend from its recorded baseline')
     if text(['git','status','--porcelain=v1','--untracked-files=all'],work):raise ValueError('Full candidate source is dirty')
@@ -215,6 +286,7 @@ def validate_config(config,public,modules=None):
 
 
 def toolchain():
+    import platform
     env=os.environ.copy();bundled=Path(os.environ.get('SUNUEFI_TOOLCHAIN_ROOT',ROOT/'build/host-tools/usr'))
     env['PATH']=str(bundled/'bin')+os.pathsep+env.get('PATH','')
     env['LD_LIBRARY_PATH']=str(bundled/'lib')+(os.pathsep+env['LD_LIBRARY_PATH']if env.get('LD_LIBRARY_PATH')else '')
@@ -227,9 +299,20 @@ def toolchain():
            'llvm-objdump','llvm-readelf','llvm-strip','make','bison','flex','bc','depmod')
     cached=bool(env.get('CCACHE_DIR'))
     if cached:names+=('ccache',)
+    cross=platform.machine() not in ('arm64','aarch64')
+    if cross:names+=('aarch64-linux-gnu-gcc',)
     binaries={name:shutil.which(name,path=env['PATH'])for name in names}
     if any(path is None for path in binaries.values()):raise ValueError('Missing full build dependencies: '+str([name for name,path in binaries.items()if path is None]))
     cc=[binaries['ccache'],binaries['clang']]if cached else[binaries['clang']]
+    if cross:
+        gcc=Path(binaries['aarch64-linux-gnu-gcc']).resolve()
+        sysroot=text([gcc,'-print-sysroot'],env=env)
+        if not sysroot or not Path(sysroot).is_dir():
+            raise ValueError('Install the ARM64 GNU cross compiler and its libc sysroot')
+        # pacman-pkg uses CC itself to build the target's external-module
+        # helpers. Keep these flags identical for the original kernel build.
+        cc+=['--target=aarch64-linux-gnu','--gcc-toolchain='+str(gcc.parent.parent),
+             '--sysroot='+sysroot]
     return env,{'paths':binaries,'sha256':{name:sha(Path(path))for name,path in binaries.items()},'compiler':text([binaries['clang'],'--version'],env=env).splitlines()[0],
                'linker':text([binaries['ld.lld'],'--version'],env=env).splitlines()[0],
                'llvm_tools':text([binaries['llvm-ar'],'--version'],env=env).splitlines(),
@@ -286,7 +369,9 @@ def main():
     userspace_security=ROOT/'linux/configs/piano-userspace-security.config'
     sleep=ROOT/'linux/configs/piano-sleep.config'
     filesystem=ROOT/'linux/configs/piano-filesystem.config'
+    gamepad=ROOT/'linux/configs/piano-gamepad.config'
     modules={**module_overrides(bluetooth.read_text()),**module_overrides(filesystem.read_text(),'filesystem'),
+             **module_overrides(gamepad.read_text(),'gamepad'),
              **module_overrides(pen_dock.read_text(),'pen-dock'),
              **module_overrides(ir.read_text(),'ir'),
              **module_overrides(flash.read_text(),'flash'),
@@ -296,7 +381,11 @@ def main():
              **module_overrides((ROOT/'linux/configs/piano-platform.config').read_text(),'platform')}
     if args.pm_debug:
         modules.update(PM_DEBUG_OVERRIDES)
-    env,tools=toolchain();out.mkdir(parents=True,exist_ok=True);artifacts.mkdir(parents=True,exist_ok=True)
+    policy=kernel_policy_identity()
+    abi_epoch=policy['policy']['abi_epoch']
+    env,tools=toolchain()
+    env.update(kernel_build_environment(abi_epoch))
+    out.mkdir(parents=True,exist_ok=True);artifacts.mkdir(parents=True,exist_ok=True)
     build_locks=[]
     lock_root=ROOT/'build/locks';lock_root.mkdir(parents=True,exist_ok=True)
     for directory in sorted({work,compiler,out,artifacts}):
@@ -308,16 +397,11 @@ def main():
     source_base=verify_source(work,commit)
     tree=text(['git','rev-parse','HEAD^{tree}'],work)
     compiler_checkout(work,compiler,commit,tree)
-    hashes={str(path.relative_to(ROOT)):sha(path)for path in (ROOT/'config/release.json',bluetooth,filesystem,pen_dock,ir,flash,early_cpucp,userspace_security,sleep,ROOT/'linux/configs/piano-platform.config',Path(__file__),ROOT/'tools/build_kernel.py',ROOT/'tools/prepare_linux_modules.py',ROOT/'tools/desktop/prepare_kernel_llvm.py',ROOT/'tools/desktop/package_build.py',ROOT/'config/kernel-llvm.json')}
+    hashes={str(path.relative_to(ROOT)):sha(path)for path in (bluetooth,filesystem,gamepad,pen_dock,ir,flash,early_cpucp,userspace_security,sleep,ROOT/'linux/configs/piano-platform.config',Path(__file__),ROOT/'tools/build_kernel.py',ROOT/'tools/prepare_linux_modules.py',ROOT/'tools/desktop/prepare_kernel_llvm.py',ROOT/'tools/desktop/package_build.py',ROOT/'config/kernel-llvm.json')}
     if marker.exists():
         previous=json.loads(marker.read_text())
-        if (not args.configure_only and previous.get('status')=='HOST_BUILT_FULL_CANDIDATE_NOT_HARDWARE_VERIFIED' and
-            previous.get('source_commit')==commit and previous.get('inputs')==hashes and
-            previous.get('local_module_overrides')==modules and previous.get('root_policy')==args.root and
-            previous.get('command_line')==root_command and previous.get('toolchain',{}).get('sha256')==tools['sha256'] and
-            (out/'.config').is_file() and sha(out/'.config')==previous.get('config_sha256') and
-            (out/'Module.symvers').is_file() and (out/'include/config/kernel.release').is_file() and
-            previous.get('module_symvers_sha256')==sha(out/'Module.symvers')):
+        if (not args.configure_only and matching_build(
+                previous,commit,hashes,policy,modules,args.root,root_command,tools,out)):
             from stage_piano_kernel_modules import inspect
             inspect(artifacts)
             print('Reusing the complete matching kernel and modules: '+previous['kernel_release'],flush=True)
@@ -328,27 +412,29 @@ def main():
     effective_text=effective_config(modules)
     effective=out/'piano-full.effective.config';effective.write_text(effective_text)
     command=['make','-C',compiler,'O='+str(out),'ARCH=arm64','LLVM=1','LLVM_IAS=1','LOCALVERSION=']
-    if tools['ccache_enabled']:
-        # Kbuild recommends a stable timestamp for useful ccache reuse.
-        env.setdefault('KBUILD_BUILD_TIMESTAMP',text(['git','show','-s','--format=%cI',commit],work))
-        tools['kbuild_build_timestamp']=env['KBUILD_BUILD_TIMESTAMP']
-        command.append('CC='+shlex.join(tools['kernel_cc']))
+    command.append('CC='+shlex.join(tools['kernel_cc']))
+    if 'aarch64-linux-gnu-gcc' in tools['paths']:
+        command.append('CROSS_COMPILE=aarch64-linux-gnu-')
     run(command+['piano_defconfig'],env=env)
     run(['bash',compiler/'scripts/kconfig/merge_config.sh','-m','-O',out,out/'.config',public,effective],cwd=compiler,env=env)
     run(command+['olddefconfig'],env=env)
     requirements=validate_config((out/'.config').read_text(),public.read_text(),modules);config_hash=sha(out/'.config')
+    suffix=kernel_abi_suffix(abi_epoch,tree,config_hash,hashes,tools['sha256'])
+    command[command.index('LOCALVERSION=')]='LOCALVERSION='+suffix
     def fresh():
         verify_source(work,commit)
         verify_source(compiler,commit)
         if text(['git','rev-parse','HEAD^{tree}'],compiler)!=tree:raise ValueError('Compiler source tree drifted')
-        if any(sha(ROOT/name)!=value for name,value in hashes.items())or sha(out/'.config')!=config_hash or effective.read_text()!=effective_text:raise ValueError('Full candidate source/config/tool inputs drifted')
+        if (kernel_policy_identity()!=policy or any(sha(ROOT/name)!=value for name,value in hashes.items())or
+                sha(out/'.config')!=config_hash or effective.read_text()!=effective_text):raise ValueError('Full candidate source/config/tool inputs drifted')
         if any(sha(Path(tools['paths'][name]))!=value for name,value in tools['sha256'].items()):raise ValueError('Full candidate build tool changed during compilation')
     fresh();state={'profile':'full-integration','mode':'complete-public-hardware','build_id':str(uuid.uuid4()),'source_commit':commit,'source_tree':tree,'source_worktree':str(compiler),'source_clean':True,
       'prepared_source_worktree':str(work),'compiler_worktree':str(compiler),
       'source_branch':text(['git','branch','--show-current'],compiler),'base_commit':source_base,
       'public_full_baseline':COMMIT,'local_patch_commits':text(['git','rev-list','--reverse',source_base+'..'+commit],work).splitlines(),
       'hardware_config_origin':{'commit':COMMIT,'base_commit':BASE_COMMIT},
-      'public_config_sha256':SOURCE_PINS,'inputs':hashes,'config_sha256':config_hash,'toolchain':tools,'root_policy':args.root,'command_line':root_command,
+      'public_config_sha256':SOURCE_PINS,'inputs':hashes,'kernel_policy':policy['policy'],'kernel_policy_sha256':policy['sha256'],
+      'config_sha256':config_hash,'toolchain':tools,'root_policy':args.root,'command_line':root_command,
       'full_profile_requirements':requirements,'local_module_overrides':modules,'hardware_verified':False,'device_operation_performed':False,'android_userdata_selected':False,
       'safe_pianoinit_external_bundle_required':True,'public_bt_le_enabled':config_values((out/'.config').read_text()).get('CONFIG_BT_LE')=='y',
       'dtb':None,'status':'CONFIGURED_NOT_BUILT'if args.configure_only else 'BUILDING_NOT_BOOTABLE'}
@@ -358,6 +444,7 @@ def main():
     image=out/'arch/arm64/boot/Image';state['image']=image_info(image)
     if not state['image']['efi_stub']:raise ValueError('Complete public candidate has no EFI stub')
     state['kernel_release']=(out/'include/config/kernel.release').read_text().strip()
+    if not kernel_release_matches(state,out):raise ValueError('Compiled kernel release differs from build inputs')
     state['module_symvers_sha256']=sha(out/'Module.symvers')
     install=artifacts/'modules'
     if install.exists():shutil.rmtree(install)

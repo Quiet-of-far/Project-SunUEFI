@@ -1,4 +1,4 @@
-From 4ccbd49289b74d6e91a84dd91ed6a04e4629e616 Mon Sep 17 00:00:00 2001
+From 7efa20da36a7a89843b35c94cd3d42c6c08c7250 Mon Sep 17 00:00:00 2001
 From: slwyts <slwyts@foxmail.com>
 Date: Thu, 22 Oct 2026 12:27:17 +0800
 Subject: [PATCH] usb: typec: ucsi: set USB mux mode for a partner present at

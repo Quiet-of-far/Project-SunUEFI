@@ -30,8 +30,6 @@ class HardwareStagingTests(unittest.TestCase):
             {'debian-piano-current': {'commit': self.pin}}))
         self.guest = self.workspace / 'build/distros/arch/rootfs'
         self.guest.mkdir(parents=True)
-        self.name = 'usr/share/alsa/ucm2/conf.d/sm8750/Xiaomi Pad 8 Pro.conf'
-        self.link_target = (ROOT / 'linux/bsp/common' / self.name).readlink()
 
     def build(self, name):
         # Only pinned-source Git metadata is substituted; all staging is real.
@@ -40,22 +38,6 @@ class HardwareStagingTests(unittest.TestCase):
                              side_effect=[self.pin + '\n', '']):
             return stage.build(self.workspace / 'build' / name,
                                self.workspace / 'public-source', self.guest)
-
-    def test_existing_alsa_link_is_preserved_and_staging_can_repeat(self):
-        destination = self.guest / self.name
-        destination.parent.mkdir(parents=True)
-        outside = self.workspace / 'host-file'
-        outside.write_text('host content')
-        destination.symlink_to(outside)
-        for name in ('first', 'second'):
-            result = self.build(name)
-            for base in (self.guest, self.workspace / 'build' / name):
-                self.assertTrue((base / self.name).is_symlink())
-                self.assertEqual((base / self.name).readlink(), self.link_target)
-                self.assertTrue((base / self.name).is_file())
-            self.assertEqual(result['symlinks'][self.name], str(self.link_target))
-            self.assertNotIn(self.name, result['files'])
-            self.assertEqual(outside.read_text(), 'host content')
 
     def test_parent_symlink_is_rejected_before_output_is_created(self):
         outside = self.workspace / 'host-directory'

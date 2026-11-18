@@ -24,7 +24,7 @@ typedef struct {
 } PIANO_SMMU_CLOSE_LEDGER;
 typedef struct {
   VOID *Domain,*Api;
-  BOOLEAN Attached,Verified,ExitRetained;
+  BOOLEAN Attached,Verified,ExitRetained,QupAttached;
   PIANO_DMA_BUFFER TableMemory;
   PIANO_IO_PAGE_TABLE PageTable;
   PIANO_SMMU_SNAPSHOT Before,After;
@@ -92,6 +92,14 @@ EFI_STATUS PianoOwnedSmmuCheckRetiredUsbContract(CONST PIANO_OWNED_SMMU *Ufs,
   CONST PIANO_SMMU_RETIRED_USB_CONTRACT *Contract,CONST PIANO_SMMU_SNAPSHOT *Current);
 EFI_STATUS PianoOwnedSmmuOpen(CONST VOID *Fdt,PIANO_OWNED_SMMU *Context,PIANO_DMA_DEVICE *Device);
 EFI_STATUS PianoOwnedSmmuOpenUsb(CONST VOID *Fdt,PIANO_OWNED_SMMU *Context,PIANO_DMA_DEVICE *Device);
+// The caller holds QUP1 clocks and proves channels idle. B6 rings and A3
+// payloads share the domain, including its mapping and retirement checks.
+EFI_STATUS PianoOwnedSmmuOpenGpi(CONST VOID *Fdt,PIANO_OWNED_SMMU *Context,PIANO_DMA_DEVICE *Device);
+// Add the two verified GPI routes to a copy of a pre-GPI snapshot. All other
+// expectations remain unchanged. No hardware access; the caller checks live registers.
+EFI_STATUS PianoOwnedSmmuExpectActiveGpi(PIANO_SMMU_SNAPSHOT *Expected);
+// Check the live GPI route before unmapping or freeing any of its DMA buffers.
+EFI_STATUS PianoOwnedSmmuCheckGpi(PIANO_OWNED_SMMU *Context);
 EFI_STATUS PianoOwnedSmmuClose(PIANO_OWNED_SMMU *Context);
 // Re-emits saved baseline/last rejection without MMIO or native HAL calls;
 // safe after clocks close. Full body CRC and its mirror have the same sequence.
