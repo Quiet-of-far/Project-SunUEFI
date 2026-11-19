@@ -426,13 +426,14 @@ def build_touch_binary(output, cc_flags, uapi, source, pen_record, env=None, lin
     return row
 
 
-def stage(output,destination,*,ram_boot=False):
+def stage(output,destination,*,ram_boot=False,include_camera=False):
     if not destination.resolve().is_relative_to(ROOT/'build/distros'):raise ValueError('Stage only into a derived workspace distro')
     manifest=json.loads((output/'manifest.json').read_text());files=manifest['runtime_files'];release=manifest['kernel']['release']
     if not re.fullmatch(r'[a-zA-Z0-9_.+-]{1,128}',release):raise ValueError('Unsafe runtime kernel release')
     expected={row[2]for row in PUBLIC_SOURCES.values()}|PEN_RUNTIME_PATHS
     if ram_boot:
         expected.add((Path('usr/lib/firmware')/TOPOLOGY_PATH).as_posix())
+    if ram_boot or include_camera:
         expected |= CAMERA_RUNTIME_PATHS
         expected.add(v4l2loopback.module_path(release).as_posix())
     if manifest.get('fingerprint'):

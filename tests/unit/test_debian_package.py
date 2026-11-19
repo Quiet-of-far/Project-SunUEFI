@@ -77,6 +77,23 @@ class DebianPackageTests(unittest.TestCase):
             debian_package.local_package_spec('gnome-shell', installed,
                                               {'Package': 'gnome-shell', 'Version': '51.0-3'})
 
+    def test_local_pipewire_abi_must_use_the_declared_native_library(self):
+        from desktop import build_pipewire_packages
+
+        name = debian_package.PIPEWIRE_ABI_PACKAGE
+        official = {'Package': name, 'Source': 'pipewire', 'Version': '1.6.9-2'}
+        version = '1.6.9-2+sunuefi' + str(build_pipewire_packages.DEBIAN_REVISION)
+        installed = {'version': version, 'source': 'pipewire',
+                     'source_version': version, 'architecture': 'arm64'}
+        output = ROOT / 'build/packages/pipewire'
+        folder, patches = debian_package.local_package_spec(name, installed, official,
+                                                            package_output=output)
+        self.assertEqual(folder, output)
+        self.assertIn('patches/pipewire/1.6.9/0009-client-node-empty-params.patch',
+                      {row['path'] for row in patches})
+        with self.assertRaisesRegex(ValueError, 'declared local revision'):
+            debian_package.local_package_spec(name, {**installed, 'version': '1.6.9-2+unknown'}, official)
+
     def test_gbm_cache_comparison_preserves_actual_local_identity(self):
         baseline = {'package': 'libgbm1', 'version': '26.2.6-1', 'source': 'mesa',
                     'source_version': '26.2.6-1', 'sha256': 'signed-package-sha'}
@@ -137,6 +154,35 @@ class DebianPackageTests(unittest.TestCase):
             {'Package': 'gnome-settings-daemon', 'Version': '51.0-2'}),
             ('gnome-settings-daemon', '51.0-2'))
 
+    def test_failed_package_validation_keeps_the_build_incomplete(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            marker = output / '.incomplete'
+            marker.touch()
+            manifest = output / 'SOURCE.json'
+            manifest.write_text('{"package_version": "1"}\n')
+            checksums = output / 'SHA256SUMS'
+            checksums.write_text('previous  runtime/camera_1_arm64.deb\n')
+            record = {'package_version': '2', 'packages_built': True,
+                      'packages': {'camera': {'file': 'camera_2_arm64.deb', 'sha256': 'new'}}}
+
+            def reject(folder, packages):
+                self.assertEqual(folder, output)
+                self.assertEqual(packages, record)
+                self.assertTrue(marker.is_file())
+                raise ValueError('The camera ABI does not match')
+
+            with self.assertRaisesRegex(ValueError, 'camera ABI does not match'):
+                debian_package.complete_build(output, record, reject)
+            self.assertTrue(marker.is_file())
+            self.assertEqual(json.loads(manifest.read_text()), {'package_version': '1'})
+            self.assertEqual(checksums.read_text(), 'previous  runtime/camera_1_arm64.deb\n')
+
+            debian_package.complete_build(output, record)
+            self.assertFalse(marker.exists())
+            self.assertEqual(json.loads(manifest.read_text()), record)
+            self.assertEqual(checksums.read_text(), 'new  runtime/camera_2_arm64.deb\n')
+
     def test_cache_requires_exact_source_abi_and_complete_binary(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
@@ -161,10 +207,24 @@ class DebianPackageTests(unittest.TestCase):
                                            'architecture': 'arm64', 'sha256': debian_package.sha(binary)}}}
             (output / 'SOURCE.json').write_text(json.dumps(record))
 
-            def reusable(selected=target, selected_inputs=inputs):
-                return debian_package.reusable(output, selected, [], {'gdm3': 'arm64'}, selected_inputs, 1)
+            def reusable(selected=target, selected_inputs=inputs, *, validate_packages=None):
+                return debian_package.reusable(output, selected, [], {'gdm3': 'arm64'}, selected_inputs, 1,
+                                               validate_packages=validate_packages)
 
+            def require_payload(folder, cached):
+                archive = folder / 'runtime' / cached['packages']['gdm3']['file']
+                if archive.read_bytes() != b'package-cache-check':
+                    raise ValueError('The package payload does not match')
+
+            self.assertIsNotNone(reusable(validate_packages=require_payload))
+            binary.write_bytes(b'package-with-wrong-payload')
+            record['packages']['gdm3']['sha256'] = debian_package.sha(binary)
+            (output / 'SOURCE.json').write_text(json.dumps(record))
             self.assertIsNotNone(reusable())
+            self.assertIsNone(reusable(validate_packages=require_payload))
+            self.assertFalse((output / '.incomplete').exists())
+            self.assertEqual(json.loads((output / 'SOURCE.json').read_text()), record)
+
             for field, value in [('suite', 'trixie'), ('architecture', 'amd64'),
                                  ('source_checksums', {'gdm3.dsc': {'sha256': 'changed', 'size': 1}}),
                                  ('abi', {'libc6': {'version': '2.43-1'}})]:
@@ -175,6 +235,18 @@ class DebianPackageTests(unittest.TestCase):
             self.assertIsNone(reusable(selected_inputs={'recipe': 'changed'}))
             verifier = Path(debian_package.__file__).relative_to(ROOT).as_posix()
             self.assertIsNotNone(reusable(selected_inputs={**inputs, verifier: 'verification-only-change'}))
+            dependency = {'libcamera-dev': {'version': '0.8.0-1', 'architecture': 'arm64', 'sha256': 'native'}}
+            self.assertIsNone(debian_package.reusable(
+                output, target, [], {'gdm3': 'arm64'}, inputs, 1, build_dependencies=dependency))
+            record['build_dependencies'] = dependency
+            (output / 'SOURCE.json').write_text(json.dumps(record))
+            self.assertIsNone(reusable())
+            self.assertIsNotNone(debian_package.reusable(
+                output, target, [], {'gdm3': 'arm64'}, inputs, 1, build_dependencies=dependency))
+            changed = {'libcamera-dev': {**dependency['libcamera-dev'], 'sha256': 'changed'}}
+            self.assertIsNone(debian_package.reusable(
+                output, target, [], {'gdm3': 'arm64'}, inputs, 1, build_dependencies=changed))
+            record.pop('build_dependencies')
             record['build_recipe_version'] = debian_package.BUILD_RECIPE_VERSION + 1
             (output / 'SOURCE.json').write_text(json.dumps(record))
             self.assertIsNone(reusable())

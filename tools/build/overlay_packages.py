@@ -14,9 +14,10 @@ from build_piano_ram_bootstrap import guest_resolve
 import package_bsp
 
 
-DEBIAN_SHARED = ('mesa', 'sensors', 'ffmpeg', 'pipewire', 'libwacom')
+DEBIAN_SHARED = ('mesa', 'sensors', 'ffmpeg', 'libcamera', 'pipewire', 'plasma_camera', 'libwacom')
 DEBIAN_GNOME = ('gnome_power', 'mutter', 'gdm')
 ARCH_REPOSITORIES = {'nyarch-gnome': 'sunuefi', 'steamos': 'sunuefi-steamos'}
+STEAMOS_TUNED_RECIPES = ('ethtool', 'hdparm', 'python-linux-procfs', 'python-pyinotify', 'tuned')
 PACMAN_SUFFIX = r'\.pkg\.tar\.(?:zst|xz|gz)'
 BSP_TARGETS = {'debian': ('debian', 'deb', 'all'), 'pacman': ('arch', 'pacman', 'any')}
 
@@ -37,7 +38,8 @@ def bsp_package(directory, package_format, *, component='config'):
     """Read the exact common package sealed by the builder."""
     distro, archive_format, architecture = BSP_TARGETS[package_format]
     expected = {'config': package_bsp.NAME, 'audio-topology': package_bsp.TOPOLOGY_PACKAGE,
-                'display-firmware': package_bsp.DISPLAY_PACKAGE}[component]
+                'display-firmware': package_bsp.DISPLAY_PACKAGE,
+                'power-profiles': package_bsp.POWER_PROFILES_PACKAGE}[component]
     manifest = directory / 'manifest.json'
     if directory.is_symlink() or manifest.is_symlink() or (directory / '.incomplete').exists():
         raise ValueError('Device package did not complete: ' + str(directory))
@@ -76,6 +78,11 @@ def bsp_package(directory, package_format, *, component='config'):
         if record.get('payload_files') != payload or record.get('public_distribution') is not False:
             raise ValueError('Display calibration package differs from the fixed source or is not local')
         metadata['firmware'] = payload
+    if component == 'power-profiles':
+        payload = {row['path']: {**row, 'bytes': len(data)}
+                   for row, data in package_bsp.power_profiles_payload()}
+        if record.get('payload_files') != payload or record.get('depends') != ['tuned-ppd']:
+            raise ValueError('Power profiles package differs from the source or dependencies')
     return archive, metadata
 
 
@@ -83,8 +90,8 @@ def build_bsp(directory, package_format, run=None, *, component='config', firmwa
     distro, archive_format, _ = BSP_TARGETS[package_format]
     command = [package_bsp.ROOT / 'build.sh', 'bsp', 'package', '--target', distro,
                '--format', archive_format, '--output', directory]
-    if component == 'audio-topology':
-        command.append('--audio-topology')
+    if component in ('audio-topology', 'power-profiles'):
+        command.append('--' + component)
     if component == 'display-firmware':
         command.extend(('--display-firmware', firmware_source or package_bsp.DISPLAY_MANIFEST.parent))
     if run is None:
@@ -94,9 +101,11 @@ def build_bsp(directory, package_format, run=None, *, component='config', firmwa
     return bsp_package(directory, package_format, component=component)
 
 
-def shared_bsp(package_format):
-    return bsp_package(package_bsp.ROOT / 'artifacts/packages/bsp' / package_format,
-                       package_format)
+def shared_bsp(package_format, *, component='config'):
+    directory = package_bsp.ROOT / 'artifacts/packages/bsp'
+    if component != 'config':
+        directory /= component
+    return bsp_package(directory / package_format, package_format, component=component)
 
 
 def topology_package(directory, package_format):
@@ -105,7 +114,7 @@ def topology_package(directory, package_format):
 
 
 def shared_topology(package_format):
-    return topology_package(package_bsp.ROOT / 'artifacts/packages/bsp', package_format)
+    return shared_bsp(package_format, component='audio-topology')
 
 
 def check_topology_conflicts(rootfs, metadata):
@@ -126,32 +135,37 @@ def verify_topology(rootfs, package_format, metadata):
         raise ValueError('Audio topology differs from the installed package: ' + row['path'])
 
 
-def verify_bsp_files(rootfs, package_format):
+def verify_bsp_files(rootfs, package_format, *, component='config'):
     """Check the final image keeps these files under native package ownership."""
-    _, rows = package_bsp.payload([])
-    if package_format == 'debian':
-        arguments = ['dpkg-query', '-L', package_bsp.NAME]
+    if component == 'power-profiles':
+        name = package_bsp.POWER_PROFILES_PACKAGE
+        rows = package_bsp.power_profiles_payload()
     else:
-        arguments = ['pacman', '-Qlq', package_bsp.NAME]
+        name = package_bsp.NAME
+        _, rows = package_bsp.payload([])
+    if package_format == 'debian':
+        arguments = ['dpkg-query', '-L', name]
+    else:
+        arguments = ['pacman', '-Qlq', name]
     paths = set(subprocess.check_output(['chroot', rootfs, *arguments], text=True).splitlines())
     for row, data in rows:
-        name = row['path']
-        relative = Path(name)
+        relative = Path(row['path'])
         path = guest_resolve(rootfs, relative.parent.as_posix()) / relative.name
-        if '/' + name not in paths or not (path.exists() or path.is_symlink()):
-            raise ValueError('Piano device configuration package does not own /' + name)
+        if '/' + row['path'] not in paths or not (path.exists() or path.is_symlink()):
+            raise ValueError(f'{name} does not own /{relative}')
         is_link = path.is_symlink()
         if (row['type'] == 'symlink') != is_link or (not is_link and not path.is_file()):
-            raise ValueError('Piano device configuration has the wrong file type: /' + name)
+            raise ValueError(f'{name} has the wrong file type: /{relative}')
         # Package managers deliberately preserve administrator changes in /etc.
-        if not name.startswith('etc/'):
+        if relative.parts[0] != 'etc':
             content = os.readlink(path).encode() if is_link else path.read_bytes()
             if content != data or stat.S_IMODE(path.lstat().st_mode) != int(row['mode'], 8):
-                raise ValueError('Piano device configuration was overwritten: /' + name)
+                raise ValueError(f'{name} file was overwritten: /{relative}')
 
 
 def debian_packages(sources):
     """Index the exact files accepted by the individual package builders."""
+    verify_debian_camera_packages({name: record for name, (_, record) in sources.items()})
     packages = {}
     for component, (folder, record) in sources.items():
         for name, info in record['packages'].items():
@@ -169,6 +183,48 @@ def debian_packages(sources):
                 raise ValueError('Multiple components contain ' + filename)
             packages[filename] = (path, row)
     return packages
+
+
+def verify_debian_camera_packages(components):
+    """Require the two camera consumers to match the archives in this set."""
+    from desktop import build_libcamera_packages as libcamera
+    from desktop import build_pipewire_packages as pipewire
+    from desktop import build_plasma_camera_package as plasma_camera
+
+    for component in ('libcamera', 'pipewire', 'plasma_camera'):
+        if component not in components:
+            raise ValueError('Missing Debian camera component: ' + component)
+    policy = libcamera.policy()
+    library = components['libcamera']
+    libcamera.verify_debian_packages(library, data=policy)
+    pipewire.verify_debian_packages(components['pipewire'])
+    plasma = components['plasma_camera']
+    version, packages = plasma.get('package_version'), plasma['packages']
+    if (not version or set(packages) != set(plasma_camera.RUNTIME) or
+            any(row['version'] != version or row['architecture'] != plasma_camera.RUNTIME[name]
+                for name, row in packages.items())):
+        raise ValueError('Invalid native Plasma Camera package set')
+
+    abi = libcamera.abi_version(policy)
+    dependencies = {name: {key: library['packages'][name][key]
+                           for key in ('version', 'architecture', 'sha256')}
+                    for name in (f'libcamera{abi}', 'libcamera-dev', f'libcamera-ipa-{abi}')}
+    for component in ('pipewire', 'plasma_camera'):
+        if components[component].get('build_dependencies') != dependencies:
+            raise ValueError('Debian ' + component + ' was not built with this libcamera package set')
+
+
+def debian_package_selection(desktop, installed):
+    """Select defaults and keep updating any optional packages already installed."""
+    from desktop.build_libcamera_packages import abi_version, policy
+    from desktop.build_pipewire_packages import DEBIAN_DEFAULT
+    from desktop.build_plasma_camera_package import PACKAGE
+
+    abi = abi_version(policy())
+    defaults = {'libcamera': {f'libcamera{abi}', f'libcamera-ipa-{abi}', 'gstreamer1.0-libcamera'},
+                'pipewire': DEBIAN_DEFAULT | {'libspa-0.2-libcamera'},
+                'plasma_camera': {PACKAGE} if desktop == 'kde' else set()}
+    return {name: values.union(installed) for name, values in defaults.items()}
 
 
 def verify_debian_generation(packages):
@@ -243,6 +299,7 @@ def read_debian(path, desktop):
                 raise ValueError('Invalid Debian overlay package record: ' + filename)
             packages[filename] = row
             names.add(name)
+    verify_debian_camera_packages(components)
     return components, packages
 
 
@@ -341,6 +398,8 @@ def read_pacman(path, target):
                 'iio-sensor-proxy', 'fastrpc', 'pipewire-v4l2-source', 'gst-plugin-pipewire'}
     expected.update(('deckard-mesa-linux-aarch64', 'gamescope', 'steamos-manager', 'gtk3', 'ibus')
                     if target == 'steamos' else ('mesa', 'gdm', 'mutter', 'gnome-settings-daemon'))
+    if target == 'steamos':
+        expected.update((*STEAMOS_TUNED_RECIPES, 'tuned-ppd'))
     if not expected <= names:
         raise ValueError('Incomplete native overlay package set')
     return repo, manifest['packages'], manifest.get('components', {})
@@ -359,11 +418,32 @@ def download_pacman(rootfs, folder, repository, packages, guest):
     return options
 
 
-def install_pacman(rootfs, folder, repository, packages, guest):
+def install_pacman(rootfs, folder, repository, packages, guest, *, overwrite=()):
     """Only install from a verified cache downloaded through the named repo."""
     options = download_pacman(rootfs, folder, repository, packages, guest)
     # No sync refresh here: resolve against the same authenticated index as -Sw.
-    guest(['pacman', '-S', *options])
+    guest(['pacman', '-S', *overwrite_options(overwrite), *options])
+
+
+def overwrite_options(paths):
+    return [argument for path in paths for argument in ('--overwrite', path)]
+
+
+def matching_power_files(rootfs):
+    """Adopt byte-identical unpackaged defaults from a resumed image."""
+    return package_bsp.conflict_check(
+        rootfs, package_bsp.power_profiles_payload(),
+        package_bsp.POWER_PROFILES_PACKAGE, adopt_identical=True)['adopted']
+
+
+def remove_steamos_power_profiles_daemon(rootfs, guest):
+    """Move a generated SteamOS image from the old PowerProfiles provider."""
+    installed = subprocess.run(['chroot', rootfs, 'pacman', '-Qq', 'power-profiles-daemon'],
+                               capture_output=True, text=True)
+    if installed.stdout.splitlines() == ['power-profiles-daemon']:
+        # Pacman only uses Replaces during a system upgrade, not a local -U.
+        guest(['systemctl', 'disable', 'power-profiles-daemon.service'])
+        guest(['pacman', '-R', '--noconfirm', 'power-profiles-daemon'])
 
 
 def verify_pacman_versions(packages, listing):
@@ -425,6 +505,7 @@ def install_arch_overlays(rootfs, kernel, target, published):
     repository, packages, components = published
     archive, bsp = shared_bsp('pacman')
     topology_archive, topology = shared_topology('pacman')
+    power_archive, power = shared_bsp('pacman', component='power-profiles')
     check_topology_conflicts(rootfs, topology)
     install(rootfs, 'pacman', kernel, published=True)
     install_repository(rootfs, target == 'steamos')
@@ -435,13 +516,20 @@ def install_arch_overlays(rootfs, kernel, target, published):
         work = Path(temporary)
         work.chmod(0o755)
         guest(['pacman', '-Sy', '--noconfirm'])
-        common = {archive.name: bsp, topology_archive.name: topology}
+        common = {archive.name: bsp, topology_archive.name: topology, power_archive.name: power}
         if repository == 'sunuefi':
-            packages = {**packages, **common}
+            install_pacman(rootfs, work, repository, {**packages, **common}, guest,
+                           overwrite=matching_power_files(rootfs))
         else:
-            install_pacman(rootfs, work, 'sunuefi', common, guest)
-        install_pacman(rootfs, work, repository, packages, guest)
-    return {**components, 'device_configuration': bsp, 'audio_topology_package': topology}
+            remove_steamos_power_profiles_daemon(rootfs, guest)
+            # The common profiles pull in the Valve TuneD packages. Verify
+            # those archives before the common package transaction uses them.
+            options = download_pacman(rootfs, work, repository, packages, guest)
+            install_pacman(rootfs, work, 'sunuefi', common, guest,
+                           overwrite=matching_power_files(rootfs))
+            guest(['pacman', '-S', *options])
+    return {**components, 'device_configuration': bsp, 'audio_topology_package': topology,
+            'power_profiles_package': power}
 
 
 def install_local_arch_bsp(rootfs):

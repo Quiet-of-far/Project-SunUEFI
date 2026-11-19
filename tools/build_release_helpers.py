@@ -2,6 +2,7 @@
 """Build the public runtime helpers with an explicit, recorded host toolchain."""
 import argparse
 import json
+import os
 from pathlib import Path
 import platform
 import shutil
@@ -9,6 +10,8 @@ import subprocess
 
 import build_piano_runtime_helpers as runtime
 import build_piano_fingerprint
+from desktop import prepare_kernel_llvm
+from package import v4l2loopback
 from prepare_release_kernel import release_series
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -106,6 +109,13 @@ def build(kernel, source, kernel_build, output, cc, sysroot, firmware_root=None)
     camera_files, camera_record = runtime.build_camera(
         output, flags, pen_record['cxx_command'], uapi, sysroot, emulator=emulator)
     files.update(camera_files)
+    module, info = v4l2loopback.compile_module(
+        kernel_build, v4l2loopback.SOURCE, output / 'v4l2loopback', release,
+        prepare_kernel_llvm.environment(os.environ.copy()), strip_debug=True)
+    files[v4l2loopback.module_path(release).as_posix()] = {
+        'file': module.relative_to(output).as_posix(), 'bytes': module.stat().st_size,
+        'sha256': runtime.sha(module), 'mode': 0o644, 'vermagic': info['vermagic'],
+    }
     for name, (relative, digest, destination) in runtime.PUBLIC_SOURCES.items():
         original = public / relative
         if runtime.sha(original) != digest:

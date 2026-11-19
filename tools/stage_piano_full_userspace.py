@@ -13,6 +13,7 @@ import subprocess
 
 from build_piano_ram_bootstrap import guest_resolve
 from package_bsp import payload
+from desktop.power_migration import RETIRED_OVERLAY
 
 ROOT=Path(__file__).resolve().parents[1]
 EXPECTED='a75f8c5d5fa099d65c171ac839c2e3bb6c63ec45'
@@ -43,12 +44,12 @@ def stage(rootfs, source, desktop='niri'):
     overlay=source/'rootfs/overlay'
     if not overlay.is_dir():raise ValueError('Complete upstream overlay missing')
     _, rows = payload(['camera'])
-    packaged = {row['path'] for row, _ in rows}
+    excluded = {row['path'] for row, _ in rows} | RETIRED_OVERLAY
     copied={}
     for path in sorted(overlay.rglob('*')):
         name=path.relative_to(overlay)
         relative = name.as_posix()
-        if relative in packaged or upstream_desktop_path(relative):
+        if relative in excluded or upstream_desktop_path(relative):
             continue
         target=rootfs/name
         # Never follow guest-root absolute links while writing on the host.

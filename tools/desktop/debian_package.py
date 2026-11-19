@@ -20,9 +20,10 @@ from desktop import package_build
 
 ROOT = Path(__file__).resolve().parents[2]
 KEYRING = '/usr/share/keyrings/debian-archive-keyring.gpg'
+PIPEWIRE_ABI_PACKAGE = 'libpipewire-0.3-0t64'
 ABI_PACKAGES = ('libc6', 'libglib2.0-0t64', 'libsystemd0', 'libgtk-4-1',
                 'libgtk-3-0t64', 'libwayland-client0', 'libgbm1',
-                'libpipewire-0.3-0t64', 'libupower-glib3', 'gnome-shell')
+                PIPEWIRE_ABI_PACKAGE, 'libupower-glib3', 'gnome-shell')
 # Bump when source preparation or compilation changes, not APT verification.
 BUILD_RECIPE_VERSION = 1
 BUILD_COMMAND = ['dpkg-buildpackage', '-b', '-us', '-uc']
@@ -262,7 +263,7 @@ def source_identity(row):
     return match[1], match[2] or row['Version']
 
 
-def local_package_spec(name, installed, official):
+def local_package_spec(name, installed, official, *, package_output=None):
     source, version = source_identity(official)
     if name == 'libgbm1':
         folder = ROOT / 'build/mesa'
@@ -283,6 +284,15 @@ def local_package_spec(name, installed, official):
         if source != 'mesa':
             raise ValueError('The signed libgbm1 source is not Mesa')
         patches = []
+    elif name == PIPEWIRE_ABI_PACKAGE:
+        from desktop import build_pipewire_packages as builder
+
+        if source != 'pipewire':
+            raise ValueError('The signed PipeWire library source is not PipeWire')
+        local_version = version + '+sunuefi' + str(builder.DEBIAN_REVISION)
+        _, _, paths = builder.debian_series(version)
+        patches = [(path, sha(path)) for path in paths]
+        folder = package_output or ROOT / 'build/pipewire'
     elif name in ('gnome-settings-daemon', 'gdm3', 'mutter', 'libwacom9'):
         # Only these package builders declare the revision and patches we accept.
         from importlib import import_module
@@ -338,8 +348,8 @@ def verify_installed_binaries(rootfs, archive):
     return expected
 
 
-def verify_local_package(rootfs, name, installed, official, sources):
-    folder, patches = local_package_spec(name, installed, official)
+def verify_local_package(rootfs, name, installed, official, sources, *, package_output=None):
+    folder, patches = local_package_spec(name, installed, official, package_output=package_output)
     record = json.loads((folder / 'SOURCE.json').read_text())
     source, version = source_identity(official)
     expected = checksum_rows(sources)
@@ -448,7 +458,7 @@ def same_target(before, after):
     return True
 
 
-def target_identity(rootfs, package):
+def target_identity(rootfs, package, *, package_output=None):
     rootfs = Path(rootfs).resolve()
     release = dict(line.split('=', 1) for line in (rootfs / 'etc/os-release').read_text().splitlines() if '=' in line)
     if release.get('ID', '').strip('"') != 'debian':
@@ -506,7 +516,9 @@ def target_identity(rootfs, package):
     for name, selected in local.items():
         official = next(row for row in rows if row['Package'] == name and row['Version'] == selected['version'])
         source = source_record(selected['source'], selected['source_version'])
-        installed_local[name] = verify_local_package(rootfs, name, installed[name], official, source)
+        installed_local[name] = verify_local_package(
+            rootfs, name, installed[name], official, source,
+            package_output=package_output if name == package else None)
         if name == 'libgbm1':
             proof = installed_local[name]
             verified = verify_gbm_abi(rootfs, official, proof)
@@ -574,7 +586,73 @@ def recipe_inputs(inputs):
             if name != Path(__file__).relative_to(ROOT).as_posix()}
 
 
-def reusable(output, target, patches, runtime, inputs, revision):
+def build_dependency_records(archives):
+    if not archives:
+        return {}
+    from build.overlay_packages import debian_identity
+
+    dependencies = {}
+    for archive in archives:
+        name, version, architecture = debian_identity(archive)
+        if name in dependencies or architecture not in ('arm64', 'all'):
+            raise ValueError('Unexpected Debian build dependency: ' + str(archive))
+        dependencies[name] = {'version': version, 'architecture': architecture,
+                              'sha256': sha(archive)}
+    return dependencies
+
+
+@contextmanager
+def build_root(sysroot, output, builder_root, *, local_dependencies):
+    rootfs = Path(builder_root).resolve() if builder_root else output / 'builder/rootfs'
+    if builder_root and (not rootfs.is_relative_to(ROOT / 'build') or output.is_relative_to(rootfs) or
+                         rootfs.is_relative_to(output)):
+        raise ValueError('Use an isolated project builder, not a product rootfs')
+    if not local_dependencies:
+        if not rootfs.exists():
+            rootfs.parent.mkdir(parents=True, exist_ok=True)
+            run(['cp', '-a', '--reflink=auto', sysroot, rootfs])
+        yield rootfs
+        return
+
+    # Do not leave an alternate ABI installed in the reusable Debian builder.
+    lower = rootfs if builder_root else sysroot
+    with tempfile.TemporaryDirectory(prefix='builder-', dir=output) as directory:
+        stage = Path(directory)
+        rootfs, upper, work = (stage / name for name in ('rootfs', 'upper', 'work'))
+        for path in (rootfs, upper, work):
+            path.mkdir()
+        run(['mount', '-t', 'overlay',
+             '-o', f'lowerdir={lower},upperdir={upper},workdir={work}', 'overlay', rootfs])
+        try:
+            yield rootfs
+        finally:
+            run(['umount', rootfs])
+
+
+def install_local_build_dependencies(rootfs, guest, archives, expected):
+    if not archives:
+        return
+    (rootfs / 'var/tmp').mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='sunuefi-build-inputs-', dir=rootfs / 'var/tmp') as directory:
+        stage = Path(directory)
+        stage.chmod(0o755)
+        files = [Path(shutil.copy2(archive, stage / Path(archive).name)) for archive in archives]
+        if build_dependency_records(files) != expected:
+            raise ValueError('Debian build dependencies changed during staging')
+        guest(['apt-get', 'install', '-y', '--no-remove', '--no-install-recommends',
+               '--reinstall', *(inside(rootfs, path) for path in files)])
+    result = capture(['chroot', rootfs, 'dpkg-query', '-W',
+                      '-f=${Package}\t${Version}\t${Architecture}\t${db:Status-Status}\n', *expected])
+    installed = {name: (version, architecture, status)
+                 for name, version, architecture, status in
+                 (line.split('\t') for line in result.splitlines())}
+    if installed != {name: (row['version'], row['architecture'], 'installed')
+                     for name, row in expected.items()}:
+        raise ValueError('Debian build dependencies differ from the selected packages')
+
+
+def reusable(output, target, patches, runtime, inputs, revision, *, build_dependencies=None,
+             validate_packages=None):
     try:
         record = json.loads((output / 'SOURCE.json').read_text())
         version = overlay_release.debian_version(target['binary']['source_version'] + '+sunuefi' + str(revision))
@@ -584,6 +662,7 @@ def reusable(output, target, patches, runtime, inputs, revision):
                 record.get('patches') != patches or recipe_inputs(record.get('inputs', {})) != recipe_inputs(inputs) or
                 recipe_version != BUILD_RECIPE_VERSION or record.get('recipe') != BUILD_RECIPE or
                 record.get('build_command') != BUILD_COMMAND or record.get('build_profiles') != BUILD_PROFILES or
+                record.get('build_dependencies', {}) != (build_dependencies or {}) or
                 record.get('package_version') != version or set(record.get('packages', {})) != set(runtime) or
                 record.get('source', {}).get('version') != target['binary']['source_version'] or
                 (output / '.incomplete').exists()):
@@ -601,14 +680,27 @@ def reusable(output, target, patches, runtime, inputs, revision):
                 return None
         if not verify_gbm_dependencies(output, record, target):
             raise ValueError('Cached desktop packages require a different Mesa GBM version; use a matching build target')
+        if validate_packages:
+            validate_packages(output, record)
         return {**record, 'build_target': record.get('build_target', record['target']), 'target': target}
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError):
         return None
+
+
+def complete_build(output, record, validate_packages=None):
+    if validate_packages:
+        validate_packages(output, record)
+    (output / 'SOURCE.json').write_text(json.dumps(record, indent=2) + '\n')
+    (output / 'SHA256SUMS').write_text(''.join(row['sha256'] + '  runtime/' + row['file'] + '\n'
+                                             for row in record['packages'].values()))
+    (output / '.incomplete').unlink()
+    return record
 
 
 def build(output, sysroot, jobs, package, patches, runtime, inputs, revision=1,
           validate=None, validate_runtime=None, builder_root=None, install_dependencies=True,
-          binary_package=None):
+          binary_package=None, test_build=None, build_dependencies=(), *, build_environment=None,
+          validate_packages=None):
     output = Path(output).resolve()
     sysroot = Path(sysroot or builder_root).resolve()
     if (not output.is_relative_to(ROOT / 'build') or not sysroot.is_relative_to(ROOT / 'build') or
@@ -617,23 +709,19 @@ def build(output, sysroot, jobs, package, patches, runtime, inputs, revision=1,
     if os.geteuid():
         raise ValueError('Use root for an isolated ARM64 Debian package build')
     binary_package = binary_package or package
-    target = target_identity(sysroot, binary_package)
+    build_dependencies = tuple(build_dependencies)
+    target = target_identity(sysroot, binary_package, package_output=output)
     patch_proof = [{'path': path.relative_to(ROOT).as_posix(), 'sha256': sha(path)} for path in patches]
     inputs = input_records([Path(__file__), Path(package_build.__file__), *inputs])
-    if cached := reusable(output, target, patch_proof, runtime, inputs, revision):
+    dependency_records = build_dependency_records(build_dependencies)
+    if cached := reusable(output, target, patch_proof, runtime, inputs, revision,
+                          build_dependencies=dependency_records, validate_packages=validate_packages):
         return cached
     if target.get('installed_local'):
         raise ValueError('Desktop cache does not match; rebuild from a clean signed sid target '
                          'before installing local desktop packages')
     output.mkdir(parents=True, exist_ok=True)
     (output / '.incomplete').write_text(package + ' package build has not completed.\n')
-    rootfs = Path(builder_root).resolve() if builder_root else output / 'builder/rootfs'
-    if builder_root and (not rootfs.is_relative_to(ROOT / 'build') or output.is_relative_to(rootfs) or
-                         rootfs.is_relative_to(output)):
-        raise ValueError('Use an isolated project builder, not a product rootfs')
-    if not rootfs.exists():
-        rootfs.parent.mkdir(parents=True, exist_ok=True)
-        run(['cp', '-a', '--reflink=auto', sysroot, rootfs])
     version = target['binary']['source_version']
     source_package = target['binary']['source']
     if source_package != package:
@@ -643,10 +731,14 @@ def build(output, sysroot, jobs, package, patches, runtime, inputs, revision=1,
               'package_version': package_version,
               'build_recipe_version': BUILD_RECIPE_VERSION,
               'build_command': BUILD_COMMAND, 'build_profiles': BUILD_PROFILES}
+    if dependency_records:
+        recipe['build_dependencies'] = dependency_records
     identity = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()[:16]
-    work = rootfs / 'build' / package / identity
-    cache, source = rootfs / 'build' / package / 'cache', work / 'source'
-    with devices(rootfs), (output / 'build.log').open('a') as log:
+    with build_root(sysroot, output, builder_root, local_dependencies=bool(dependency_records)) as rootfs, \
+            devices(rootfs), (output / 'build.log').open('a') as log:
+        work = rootfs / 'build' / package / identity
+        cache, source = rootfs / 'build' / package / 'cache', work / 'source'
+
         def guest(args):
             return chroot(rootfs, args, stdout=log, stderr=subprocess.STDOUT)
 
@@ -669,6 +761,7 @@ def build(output, sysroot, jobs, package, patches, runtime, inputs, revision=1,
             builder_target = target_identity(rootfs, binary_package)
             if not same_target(builder_target, target) or builder_target.get('installed_local'):
                 raise ValueError('The existing builder does not match the supplied clean target ABI/source')
+        install_local_build_dependencies(rootfs, guest, build_dependencies, dependency_records)
         cache.mkdir(parents=True, exist_ok=True)
         guest(['sh', '-ec', 'cd "$1"; apt-get source --download-only --only-source "$2"',
                'source', inside(rootfs, cache), package + '=' + version])
@@ -697,20 +790,25 @@ def build(output, sysroot, jobs, package, patches, runtime, inputs, revision=1,
                 raise ValueError('Prepared patch differs: ' + patch.name)
         if (source / 'debian/changelog').read_text().split('(', 1)[1].split(')', 1)[0] != package_version:
             raise ValueError('Prepared Debian package version differs')
+        directory = inside(rootfs, source)
+        if (source / '.pc/.dpkg-source-unapply').exists():
+            # An interrupted build can leave quilt patches applied to packaging files.
+            guest(['sh', '-ec', 'cd "$1"; dpkg-source --after-build .', 'unapply', directory])
         archive = next(row for row in origin['archives'] if '.debian.tar.' in row['file'])
         with tarfile.open(cache / archive['file']) as packaging:
             for name in ('debian/rules', 'debian/control'):
                 if (source / name).read_bytes() != packaging.extractfile(name).read():
                     raise ValueError('Original Debian packaging changed: ' + name)
-        directory = inside(rootfs, source)
         guest(['sh', '-ec', 'cd "$1"; dpkg-source --before-build .; dpkg-checkbuilddeps -Pnocheck',
                'prepare', directory])
         if validate:
             validate(source)
-        with package_build.environment(rootfs) as settings:
+        with (build_environment or package_build.environment)(rootfs) as settings:
             guest(['env', *package_build.arguments(settings), f'DEB_BUILD_OPTIONS=nocheck parallel={jobs}',
                    'DEB_BUILD_PROFILES=nocheck', 'sh', '-ec', 'cd "$1"; dpkg-buildpackage -b -us -uc',
                    'build', directory])
+            if test_build:
+                test_build(guest, directory)
         changes = work / f'{package}_{package_version.split(":")[-1]}_arm64.changes'
         buildinfo = changes.with_suffix('.buildinfo')
         change = next(row for row in controls(changes.read_text()) if row.get('Source') == package)
@@ -752,8 +850,6 @@ def build(output, sysroot, jobs, package, patches, runtime, inputs, revision=1,
                   'build_command': BUILD_COMMAND,
                   'build_options': f'nocheck parallel={jobs}', 'build_profiles': BUILD_PROFILES,
                   'changes_sha256': sha(changes), 'buildinfo_sha256': sha(buildinfo)}
-        (output / 'SOURCE.json').write_text(json.dumps(record, indent=2) + '\n')
-        (output / 'SHA256SUMS').write_text(''.join(row['sha256'] + '  runtime/' + row['file'] + '\n'
-                                                 for row in packages.values()))
-        (output / '.incomplete').unlink()
-        return record
+        if dependency_records:
+            record['build_dependencies'] = dependency_records
+    return complete_build(output, record, validate_packages)

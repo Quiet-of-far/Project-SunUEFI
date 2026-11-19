@@ -44,8 +44,8 @@
   },
   "kernel": {
     "target": "release",
-    "abi_epoch": 1795022727,
-    "package_epoch": 1795022727,
+    "abi_epoch": 1795050814,
+    "package_epoch": 1795050814,
     "public_baseline": "352508459733d3e6d349ea5581a8dd2fd8bb4180",
     "patch_series": "patches/linux/7.3/series.json",
     "stable_source_mirrors": [
@@ -88,7 +88,7 @@
       "panel_vendor": "auto"
     },
     "localversion": "-piano-sunuefi-cachy-optimize",
-    "target_tree": "14cf40d498e1cfbb9d9a76ff53f0e707050eecf5"
+    "target_tree": "c7ee37788a3ce92427eccddb5d665998a88880d2"
   },
   "camera_package": {
     "version": "1.0",

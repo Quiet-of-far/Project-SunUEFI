@@ -51,7 +51,7 @@ def stage(args):
     if current_modules.exists():
         shutil.rmtree(current_modules)
     modules.stage(root, args.kernel, old_modules)
-    runtime.stage(args.runtime.resolve(), root)
+    runtime.stage(args.runtime.resolve(), root, include_camera=True)
     from build_piano_fingerprint import install_desktop
     install_desktop(root, args.runtime.resolve(), output / 'fingerprint-packages')
     # Use the reviewed, patched sensor importer source; Debian packaging itself

@@ -12,8 +12,8 @@
   "kernel_version": "7.3.3",
   "base_commit": "d50d994bffa3c7c6db2d8bc4c5f0c55e3f46b0cd",
   "base_tree": "a3d0b8db615452e89f37be4454c80262c06ecc99",
-  "target_tree": "14cf40d498e1cfbb9d9a76ff53f0e707050eecf5",
-  "original_target_commit": "dee54eeee71f52f20bb6d12cafefb6d6810fdab0",
+  "target_tree": "c7ee37788a3ce92427eccddb5d665998a88880d2",
+  "original_target_commit": "aca9941ba93cf3a901d31ab914cbfa6cf9340bd5",
   "source_url": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
   "patches": [
     {
@@ -1762,12 +1762,25 @@
       }
     },
     {
-      "file": "0137-power-piano-charge-limit.patch",
-      "sha256": "a97722d1af0c57f1fd0330563b5aa0e3a774cda294fb37cf56aafb7e8493b393",
-      "original_commit": "dee54eeee71f52f20bb6d12cafefb6d6810fdab0",
+      "file": "0137-LOCAL-leds-qcom-flash-fix-safety-timer.patch",
+      "sha256": "a8a827944ca41b2cfeb40f9d23eaa244c916d73fc3bb8e23c4a9e87f1741c887",
+      "original_commit": "c503c89eef09165b6fccee168ecdd153fe15e634",
       "original_parent": "4f011337e8078c7ae47e0099907b68c8f3467201",
-      "committer_date": "2026-11-19T01:44:36+08:00",
-      "tree": "14cf40d498e1cfbb9d9a76ff53f0e707050eecf5",
+      "committer_date": "2026-11-19T09:13:34+08:00",
+      "tree": "da0cb7a89ce0fcf83a83d8a40ba9c3c70c1daa3f",
+      "upstream": {
+        "status": "downstream",
+        "url": "https://github.com/slwyts/Project-SunUEFI",
+        "drop_when": "The selected kernel encodes a 10 ms MVFLASH safety timeout as the enabled zero duration code."
+      }
+    },
+    {
+      "file": "0138-LOCAL-power-piano-charge-limit.patch",
+      "sha256": "70b894f2a2ae36eef1e79e685cdbcb77ceba92d1eb2d23068a3a9ee3d6698c4e",
+      "original_commit": "aca9941ba93cf3a901d31ab914cbfa6cf9340bd5",
+      "original_parent": "c503c89eef09165b6fccee168ecdd153fe15e634",
+      "committer_date": "2026-11-19T14:06:02+08:00",
+      "tree": "c7ee37788a3ce92427eccddb5d665998a88880d2",
       "upstream": {
         "status": "downstream",
         "url": "https://github.com/Quiet-of-far/Project-SunUEFI",

@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
 import build_arch_niri_rootfs as builder
 from rootfs import arch
+import build_piano_runtime_helpers as runtime
 
 
 class ArchNiriTests(unittest.TestCase):
@@ -76,6 +77,45 @@ class ArchNiriTests(unittest.TestCase):
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 2)
             self.assertIn('Unknown command', result.stderr)
+
+    def test_arch_runtime_installs_camera_and_matching_module_with_exact_paths(self):
+        workspace = Path(self.temp.name)
+        root = workspace / 'build/distros/arch/rootfs'
+        bundle = workspace / 'runtime'
+        release = '7.3.3-piano-test'
+        (root / 'usr/lib/modules' / release / 'kernel').mkdir(parents=True)
+        bundle.mkdir()
+        blob = bundle / 'artifact'
+        blob.write_bytes(b'compiled payload')
+        module = f'usr/lib/modules/{release}/updates/v4l2loopback.ko'
+        camera = {
+            'usr/lib/piano/piano-camerad',
+            'usr/bin/piano-camera-ctl',
+            'usr/share/licenses/piano-camera/LICENSE-MIT',
+            'usr/share/licenses/piano-quad/LICENSE-MIT',
+            'usr/share/licenses/demosaic/LICENSE-MIT',
+            module,
+        }
+        basic = {row[2] for row in runtime.PUBLIC_SOURCES.values()} | runtime.PEN_RUNTIME_PATHS
+        manifest = {
+            'kernel': {'release': release}, 'pen_core': {'input': {}},
+            'runtime_files': {
+                name: {'file': blob.name, 'mode': 0o644,
+                       'bytes': blob.stat().st_size, 'sha256': runtime.sha(blob)}
+                for name in (basic | camera) - {module}
+            },
+        }
+        manifest_path = bundle / 'manifest.json'
+        manifest_path.write_text(json.dumps(manifest))
+        with patch.object(runtime, 'ROOT', workspace), \
+                patch.object(runtime, 'pen_kernel_inputs', return_value=({}, {})):
+            with self.assertRaisesRegex(ValueError, 'exact contract'):
+                runtime.stage(bundle, root, include_camera=True)
+            self.assertFalse((root / 'usr/lib/piano/piano-camerad').exists())
+            manifest['runtime_files'][module] = manifest['runtime_files']['usr/lib/piano/piano-camerad']
+            manifest_path.write_text(json.dumps(manifest))
+            runtime.stage(bundle, root, include_camera=True)
+        self.assertTrue(all((root / name).read_bytes() == blob.read_bytes() for name in camera))
 
     def test_mesa_upgrade_protection_preserves_other_pacman_configuration(self):
         root = Path(self.temp.name)
