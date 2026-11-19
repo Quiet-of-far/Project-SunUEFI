@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import shutil
 import sys
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -23,6 +24,37 @@ class AssembleTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         shutil.copytree(ROOT / 'linux/rootfs', self.root / 'linux/rootfs')
         shutil.copytree(ROOT / 'linux/desktops', self.root / 'linux/desktops')
+
+    def test_arch_download_retries_only_uncommitted_transfer_failure(self):
+        transient = (
+            "error: failed retrieving file 'foot.pkg.tar.xz' from mirror.example : Operation too slow\n"
+            'warning: failed to retrieve some files\n'
+            'Errors occurred, no packages were upgraded.\n'
+        )
+        log = self.root / 'build.log'
+        count = self.root / 'attempted'
+        script = (
+            'from pathlib import Path; import sys; '
+            'p = Path(sys.argv[1]); '
+            'n = int(p.read_text()) + 1 if p.exists() else 1; p.write_text(str(n)); '
+            'sys.exit(sys.argv[2] if n <= int(sys.argv[3]) else 0)'
+        )
+        for diagnostic, fail_count, expected in (
+            (transient, 1, 2),
+            (transient, 3, 3),
+            ('error: invalid or corrupted package (PGP signature)', 1, 1),
+        ):
+            with self.subTest(diagnostic=diagnostic, fail_count=fail_count):
+                count.unlink(missing_ok=True)
+                args = [sys.executable, '-c', script, count, diagnostic, str(fail_count)]
+                with patch.object(tool.time, 'sleep') as sleep, patch.object(sys, 'stderr', io.StringIO()):
+                    if expected > fail_count:
+                        tool.run_logged(args, log, retry_downloads=True)
+                    else:
+                        with self.assertRaises(subprocess.CalledProcessError):
+                            tool.run_logged(args, log, retry_downloads=True)
+                self.assertEqual(count.read_text(), str(expected))
+                self.assertEqual(sleep.call_count, expected - 1)
 
     def args(self, distro='arch', desktop='niri', *extra):
         return tool.parser().parse_args(['--distro', distro, '--desktop', desktop, '--plan', *extra])

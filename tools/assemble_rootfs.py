@@ -13,12 +13,44 @@ import struct
 import subprocess
 import sys
 import tarfile
+import time
 from urllib.parse import urlsplit
 from build_chroot import bind_devices, guest_command, stop_helpers
 from build_piano_ram_bootstrap import guest_resolve
 
 ROOT = Path(__file__).resolve().parents[1]
 LAYERS = {'mesa', 'runtime', 'modules', 'firmware'}
+
+
+def run_logged(args, log, *, retry_downloads=False, **kwargs):
+    """Retry pacman fetch failures before any package changes are committed."""
+    argv = list(map(str, args))
+    for attempt in range(3):
+        with log.open('ab') as stream:
+            start = stream.tell()
+            try:
+                return subprocess.run(argv, stdout=stream, stderr=subprocess.STDOUT,
+                                      check=True, **kwargs)
+            except subprocess.CalledProcessError as error:
+                if not retry_downloads:
+                    raise
+                failure = error
+        with log.open('rb') as stream:
+            stream.seek(start)
+            output = stream.read().decode(errors='replace')
+        retryable = ('failed to retrieve some files' in output and
+                     'Errors occurred, no packages were upgraded.' in output and
+                     re.search(r'^error: failed retrieving file .* : .*'
+                               r'(?:Operation too slow|timed out|Could not resolve host|'
+                               r'Failed to connect|Connection reset|returned error: 5[0-9]{2})',
+                               output, re.M))
+        if not retryable or attempt == 2:
+            print('\n'.join(output.splitlines()[-35:]), file=sys.stderr, flush=True)
+            raise failure
+        delay = 5 * (attempt + 1)
+        print(f'Arch package download failed. Retrying the transaction in {delay}s.',
+              file=sys.stderr, flush=True)
+        time.sleep(delay)
 
 
 def sha(path):
@@ -228,8 +260,9 @@ def execute(result):
     out.mkdir(parents=True); root.mkdir(); mounted = []; devices = ExitStack(); log = out / 'build.log'
     cross = platform.machine() not in ('aarch64', 'arm64')
     def run(args, **kwargs):
-        with log.open('a') as stream: return subprocess.run(list(map(str, args)), stdout=stream, stderr=subprocess.STDOUT, check=True, **kwargs)
+        return run_logged(args, log, **kwargs)
     def guest(args, text=False, check=True, input=None):
+        retry_downloads = args[0] == 'pacman' and len(args) > 1 and args[1] in ('-Syu', '-S')
         if args[0] == 'pacman':
             # QEMU user-mode cannot implement pacman's Landlock syscalls.
             # This applies only to the build chroot, not its installed config.
@@ -237,10 +270,10 @@ def execute(result):
                     *(['--disable-sandbox'] if cross else []), *args[1:]]
         argv = guest_command(root, ['/usr/bin/env', 'PATH=/usr/sbin:/usr/bin:/sbin:/bin',
                                     'SYSTEMD_OFFLINE=1', 'SYSTEMD_IN_CHROOT=1',
-                                    'DEBIAN_FRONTEND=noninteractive', *args])
+                                    'DEBIAN_FRONTEND=noninteractive', 'LC_ALL=C', *args])
         if text: return subprocess.check_output(argv, text=True)
         if not check: return subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return run(argv, input=input, text=input is not None)
+        return run(argv, retry_downloads=retry_downloads, input=input, text=input is not None)
     try:
         base = out / 'base.tar'
         if result.get('base_file'):
