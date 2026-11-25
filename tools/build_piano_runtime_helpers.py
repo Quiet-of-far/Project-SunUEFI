@@ -86,9 +86,11 @@ def build_topology(public, macros, destination, env=None):
     config=destination/'piano.conf'
     target=destination/TOPOLOGY_PATH
     target.parent.mkdir(parents=True,exist_ok=True)
-    with config.open('w') as output:
-        subprocess.run(['m4','-I',public/'topology','-I',macros,source],
-                       stdout=output,env=env,check=True)
+    topology = subprocess.check_output(['m4', '-I', public / 'topology', '-I', macros, source], env=env)
+    # ASoC prefixes volume controls with the widget name. Keep the playback suffix.
+    topology = topology.replace(b'stream0.vol_ctrl0', b'stream0.vol0')
+    topology = topology.replace(b'stream1.vol_ctrl1', b'stream1.vol1')
+    config.write_bytes(topology)
     subprocess.run(['alsatplg','-c',config,'-o',target],env=env,check=True)
     if sha(target)!=policy['sha256']:
         raise ValueError('Product topology differs from its recorded source build')

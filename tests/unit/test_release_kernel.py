@@ -24,6 +24,11 @@ SOURCE_URL = "https://github.com/example/release-kernel-fixture.git"
 PREPARATION_ERRORS = (ValueError, RuntimeError, subprocess.CalledProcessError)
 
 
+class CheckedInReleaseSeriesTests(unittest.TestCase):
+    def test_checked_in_series_has_complete_replay_metadata(self):
+        builder.load_series(ROOT, builder.DEFAULT_TARGET)
+
+
 @unittest.skipUnless(shutil.which("git"), "Git is required for release source fixtures")
 class ReleaseKernelTests(unittest.TestCase):
     def setUp(self):
@@ -65,7 +70,7 @@ class ReleaseKernelTests(unittest.TestCase):
             commit = self.git("rev-parse", "HEAD")
             filename = f"{index:04d}-fixture-change.patch"
             patch_path = self.patch_directory / filename
-            patch_path.write_bytes(self.git_bytes("format-patch", "--stdout", "-1", commit))
+            patch_path.write_bytes(self.git_bytes("format-patch", "--zero-commit", "--stdout", "-1", commit))
             records.append({
                 "file": filename,
                 "sha256": self.sha256(patch_path),
@@ -303,7 +308,7 @@ class ReleaseKernelTests(unittest.TestCase):
                           '-m', 'Fixture: provide the final configuration in one patch')
         file = '0001-fixture-folded.patch'
         path = self.patch_directory / file
-        path.write_bytes(self.git_bytes('format-patch', '--stdout', '-1', folded))
+        path.write_bytes(self.git_bytes('format-patch', '--zero-commit', '--stdout', '-1', folded))
         self.manifest['patches'] = [{
             'file': file, 'sha256': self.sha256(path), 'original_commit': folded,
             'original_parent': self.base_commit, 'tree': self.target_tree,
@@ -386,7 +391,7 @@ class ReleaseKernelTests(unittest.TestCase):
         local_tree = self.git('rev-parse', 'HEAD^{tree}')
         filename = '0001-cold-local.patch'
         path = self.patch_directory / filename
-        path.write_bytes(self.git_bytes('format-patch', '--stdout', '-1', local))
+        path.write_bytes(self.git_bytes('format-patch', '--zero-commit', '--stdout', '-1', local))
         row = {'file': filename, 'sha256': self.sha256(path), 'original_commit': local,
                'original_parent': public, 'committer_date': self.git('show', '-s', '--format=%cI', local),
                'tree': local_tree}
@@ -427,6 +432,16 @@ class ReleaseKernelTests(unittest.TestCase):
         patch_path = self.patch_directory / self.manifest["patches"][0]["file"]
         patch_path.write_bytes(patch_path.read_bytes() + b"tampered after export\n")
         with self.assertRaises(PREPARATION_ERRORS):
+            self.prepare()
+        self.assert_no_preparation_mutation()
+
+    def test_patch_with_nonzero_commit_header_is_rejected_before_worktree_creation(self):
+        row = self.manifest['patches'][0]
+        path = self.patch_directory / row['file']
+        path.write_bytes(self.git_bytes('format-patch', '--stdout', '-1', row['original_commit']))
+        row['sha256'] = self.sha256(path)
+        self.write_manifest()
+        with self.assertRaisesRegex(ValueError, '--zero-commit'):
             self.prepare()
         self.assert_no_preparation_mutation()
 

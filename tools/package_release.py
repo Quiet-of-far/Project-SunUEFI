@@ -26,10 +26,87 @@ MIB = 1024 * 1024
 CLOCK_EPOCH = 'usr/lib/clock-epoch'
 
 
+def normalize_boot_framebuffer(tree):
+    """Put the folded boot framebuffer where Linux expects the handoff."""
+    root_framebuffers = []
+    for path, props in tree.items():
+        if b'simple-framebuffer' not in props.get('compatible', b'').split(b'\0'):
+            continue
+        if path.startswith('/chosen/') and path.count('/') == 2:
+            return []
+        if (path.startswith('/framebuffer@') and path.count('/') == 1 and
+                props.get('status', b'okay\0') in (b'ok\0', b'okay\0')):
+            root_framebuffers.append(path)
+    if len(root_framebuffers) != 1:
+        return []
+
+    path = root_framebuffers[0]
+    target = '/chosen' + path
+    if target in tree or any(node.startswith(path + '/') for node in tree):
+        return []
+    address_cells = tree['/'].get('#address-cells', struct.pack('>I', 2))
+    size_cells = tree['/'].get('#size-cells', struct.pack('>I', 1))
+    if len(address_cells) != 4 or len(size_cells) != 4:
+        return []
+    address_count, size_count = (int.from_bytes(cells, 'big')
+                                 for cells in (address_cells, size_cells))
+    reg = tree[path].get('reg', b'')
+    if address_count not in (1, 2) or size_count not in (1, 2):
+        return []
+    if len(reg) != 4 * (address_count + size_count) or not any(reg[4 * address_count:]):
+        return []
+    chosen = tree.get('/chosen', {})
+    bus_props = {'#address-cells': address_cells, '#size-cells': size_cells, 'ranges': b''}
+    if any(chosen.get(name, value) != value for name, value in bus_props.items()):
+        return []
+
+    # The /chosen simplefb registration also suppresses the matching EFI
+    # sysfb instance. Keep the original framebuffer memory and properties.
+    tree['/chosen'] = chosen
+    chosen.update(bus_props)
+    tree[target] = tree.pop(path)
+    old, new = path.encode(), target.encode()
+    for table in ('/__symbols__', '/aliases'):
+        for name, value in tree.get(table, {}).items():
+            if value == old + b'\0':
+                tree[table][name] = new + b'\0'
+    for name in ('stdout-path', 'linux,stdout-path'):
+        value = chosen.get(name, b'')
+        if value == old + b'\0' or value.startswith(old + b':'):
+            chosen[name] = new + value[len(old):]
+    return [path + ' -> ' + target]
+
+
+def preserve_charger_thermistor_pin(tree):
+    spmi = '/soc/qcom,spmi@c42d000/'
+    adc = spmi + 'qcom,pmk8550@0/vadc@9000'
+    gpio = spmi + 'qcom,pmih010x@7/pinctrl@8800'
+    pin = tree.get(gpio + '/charger1_therm/charger1_therm_default', {})
+    phandle = pin.get('phandle', b'')
+    adc_props = tree.get(adc, {})
+    states = adc_props.get('pinctrl-0', b'')
+    if (pin.get('pins') != b'gpio12\0' or pin.get('bias-high-impedance') != b'' or
+            len(phandle) != 4 or len(states) < 8 or len(states) % 4 or
+            adc_props.get('compatible') != b'qcom,spmi-adc5-gen3\0' or
+            adc_props.get('pinctrl-names') != b'default\0'):
+        return []
+    cells = [states[i:i + 4] for i in range(0, len(states), 4)]
+    if cells.count(phandle) != 1:
+        return []
+
+    # The PMIC arbiter permits observation of GPIO12 but rejects AP writes.
+    # Keep its firmware configuration and apply the other thermistor states.
+    cells.remove(phandle)
+    adc_props['pinctrl-0'] = b''.join(cells)
+    return [adc + ':pinctrl-0']
+
+
 def normalize_mainline_bindings(board):
-    """Remove downstream-only bindings retained by the folded Android DT."""
+    """Adapt the folded Android DT to the active Linux bindings."""
     parsed = read_fdt(board.read_bytes())
-    tree, changes = parsed['tree'], []
+    tree = parsed['tree']
+    changes = normalize_boot_framebuffer(tree)
+    changes.extend(preserve_charger_thermistor_pin(tree))
     # A folded Android tree contains debug blocks and suppliers whose binding
     # is not implemented by mainline. Disable those devices in the DT rather
     # than suppressing autoload for every platform/OF device in userspace.
@@ -87,6 +164,14 @@ def normalize_mainline_bindings(board):
             for key in ('fp_3v3_vreg-supply', 'pinctrl-1', 'pinctrl-2',
                         'xiaomi,gpio_irq', 'xiaomi,vendor_names', 'netlink-event'):
                 if key in props:
+                    del props[key]
+                    changes.append(path + ':' + key)
+        if (path == '/soc/isp-ml@ad27000' and
+                props.get('reg-names', b'').startswith(b'top\0')):
+            # Standalone CSI PHYs own their supplies. The old CAMSS links
+            # point at Android-only regulator nodes and can delay probing.
+            for key in tuple(props):
+                if re.fullmatch(r'vdd-csiphy[0-5]-(?:0p9|1p2)-supply', key):
                     del props[key]
                     changes.append(path + ':' + key)
         downstream = any(path == root or path.startswith(root + '/') for root in legacy)

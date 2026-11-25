@@ -72,6 +72,9 @@ DISK_MODULES=('MdeModulePkg/Universal/Disk/DiskIoDxe/DiskIoDxe.inf',
 HOST_MODULES=('MdeModulePkg/Bus/Pci/XhciDxe/XhciDxe.inf','MdeModulePkg/Bus/Usb/UsbBusDxe/UsbBusDxe.inf',
     'MdeModulePkg/Bus/Usb/UsbKbDxe/UsbKbDxe.inf','MdeModulePkg/Bus/Usb/UsbMouseDxe/UsbMouseDxe.inf',
     'MdeModulePkg/Bus/Usb/UsbMassStorageDxe/UsbMassStorageDxe.inf')
+ACPI_MODULES=('MdeModulePkg/Universal/Acpi/AcpiTableDxe/AcpiTableDxe.inf',
+              'MdeModulePkg/Universal/Acpi/AcpiPlatformDxe/AcpiPlatformDxe.inf')
+ACPI_TABLES='pianoProductPkg/AcpiTables/AcpiTables.inf'
 
 
 def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -435,7 +438,9 @@ def core_inf():
   gEfiDevicePathProtocolGuid
   gEfiCpuArchProtocolGuid
   gEfiLoadedImageProtocolGuid
+  gEfiLoadFileProtocolGuid
   gEfiLoadFile2ProtocolGuid
+  gEfiWatchdogTimerArchProtocolGuid
   gEfiPartitionInfoProtocolGuid
   gEfiPciIoProtocolGuid
   gEfiSimpleFileSystemProtocolGuid
@@ -480,6 +485,7 @@ def prepare(root=ROOT):
     shutil.rmtree(target/'Library/Stage0BootManagerLib')
     shutil.rmtree(target/'Library/RamLogSerialPortLib')
     shutil.copytree(root/'uefi/components/product-support',target,dirs_exist_ok=True)
+    shutil.copytree(root/'uefi/components/acpi',target/'AcpiTables')
     app=target/'Applications/ProductCore';app.mkdir(parents=True)
     for name in SOURCE_NAMES:shutil.copyfile(core_source(name, root),app/name)
     from compose_piano_dtb import read_fdt
@@ -524,7 +530,7 @@ def prepare(root=ROOT):
     shutil.copyfile(root/'upstream/Mu-Silicium/Mu_Basecore/MdeModulePkg/Universal/Console/GraphicsConsoleDxe/PianoChineseGlyphs.h',app/'PianoChineseGlyphs.h')
     (app/'ProductCore.inf').write_text(core_inf())
     from firmware.prepare_ext4 import prepare as prepare_ext4
-    ext4=prepare_ext4(root,target)
+    ext4_library=prepare_ext4(root,target)
     verify_os_boot(root,app,os_boot)
     verify_observation_families(root,app,observation)
     verify_provider(root,app,late_provider)
@@ -569,12 +575,12 @@ def prepare(root=ROOT):
       gEfiMdePkgTokenSpaceGuid.PcdUefiVariableDefaultPlatformLang|"en-US"
   }
   MdeModulePkg/Logo/LogoDxe.inf
-  pianoProductPkg/Drivers/PianoExt4Dxe/PianoExt4Dxe.inf
   MdeModulePkg/Bus/Pci/XhciDxe/XhciDxe.inf
   MdeModulePkg/Bus/Usb/UsbMouseDxe/UsbMouseDxe.inf
   pianoProductPkg/Drivers/PianoGopDxe/PianoGopDxe.inf
   pianoProductPkg/Applications/ProductCore/ProductCore.inf {
     <LibraryClasses>
+      NULL|'''+ext4_library+'''
       BaseCryptLib|OpensslPkg/Library/BaseCryptLib/BaseCryptLib.inf
       OpensslLib|OpensslPkg/Library/OpensslLib/OpensslLib.inf
       IntrinsicLib|CryptoPkg/Library/IntrinsicLib/IntrinsicLib.inf
@@ -594,6 +600,7 @@ def prepare(root=ROOT):
   }
 '''
     text+='  pianoProductPkg/'+SIMPLEINIT_BOOT_MODULE+'\n'
+    text+='  '+ACPI_TABLES+'\n'
     text+=SETUP_DSC_ADDITIONS
     # All service flags bind actual product implementations; diagnostics are
     # not dispatched. FETCH enables the shared live SMMU storage guard.
@@ -604,10 +611,11 @@ def prepare(root=ROOT):
     dsc.write_text(text)
     fdf=target/'pianoProduct.fdf';text=fdf.read_text().replace('# Host-only stage-0 diagnostic; NOT hardware validated.','# Single PianoUEFI product integration candidate; INCOMPLETE_NOT_RELEASE.')
     text=text.replace('SiliciumPkg/Drivers/SimpleFbDxe/SimpleFbDxe.inf','pianoProductPkg/Drivers/PianoGopDxe/PianoGopDxe.inf')
-    modules=DISK_MODULES+HOST_MODULES+SETUP_FV_MODULES+(
+    modules=DISK_MODULES+HOST_MODULES+ACPI_MODULES+SETUP_FV_MODULES+(
         BOOT_PICKER_MODULE,'pianoProductPkg/'+SIMPLEINIT_BOOT_MODULE,'MdeModulePkg/Logo/LogoDxe.inf',
-        ext4['module'],'ShellPkg/Application/Shell/Shell.inf','pianoProductPkg/Applications/ProductCore/ProductCore.inf')
-    text=text.replace('!include SiliciumPkg/Common.fdf.inc',''.join('  INF '+module+'\n' for module in modules)+native_fdf+'\n!include SiliciumPkg/Common.fdf.inc')
+        'ShellPkg/Application/Shell/Shell.inf','pianoProductPkg/Applications/ProductCore/ProductCore.inf')
+    text=text.replace('!include SiliciumPkg/Common.fdf.inc',''.join('  INF '+module+'\n' for module in modules)+
+        '  INF RuleOverride = ACPITABLE '+ACPI_TABLES+'\n'+native_fdf+'\n!include SiliciumPkg/Common.fdf.inc')
     fdf.write_text(text)
     early_memory=prepare_early_memory(root,target)
     verify_early_memory(root,target,early_memory)

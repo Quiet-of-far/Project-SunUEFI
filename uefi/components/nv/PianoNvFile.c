@@ -7,7 +7,9 @@
 #include <Protocol/SimpleFileSystem.h>
 #include <Protocol/PartitionInfo.h>
 #include <Guid/FileInfo.h>
+#include <Guid/FileSystemInfo.h>
 #include <Guid/EventGroup.h>
+#include <Guid/GlobalVariable.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/UefiRuntimeServicesTableLib.h>
 #include <Library/BaseMemoryLib.h>
@@ -18,13 +20,15 @@
 #define HEADER 40U
 #define NAME_BYTES 2048U
 STATIC EFI_GUID mGuid=PIANO_NV_FILE_PROTOCOL_GUID;
-STATIC EFI_HANDLE mHandle,mVolumeHandle;
+STATIC EFI_HANDLE mHandle;
 STATIC PIANO_NV_FILE_PROTOCOL mProtocol={1,0,FALSE};
 STATIC EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *mFs;
 STATIC UINT64 mSequence,mSavedChanges;
 STATIC UINT32 mActive;
 STATIC BOOLEAN mStarted,mBusy;
-STATIC BOOLEAN mUnavailable,mExited;
+STATIC BOOLEAN mExited;
+STATIC EFI_STATUS mSaveError;
+STATIC UINTN mRestoredBootNext=MAX_UINTN;
 STATIC EFI_EVENT mExit;
 STATIC CHAR16 *mNames[]={L"\\sunuefi\\nvram-a.bin",L"\\sunuefi\\nvram-b.bin"};
 STATIC UINT32 U32(CONST UINT8 *P){UINT32 V;CopyMem(&V,P,4);return V;}
@@ -34,18 +38,17 @@ STATIC VOID W64(UINT8 *P,UINT64 V){CopyMem(P,&V,8);}
 STATIC EFI_STATUS Volume(VOID){
   EFI_HANDLE *H=NULL;UINTN N=0,Found=0;EFI_STATUS S=gBS->LocateHandleBuffer(ByProtocol,&gEfiSimpleFileSystemProtocolGuid,NULL,&N,&H);
   if(S!=EFI_SUCCESS)return S;
-  EFI_HANDLE Selected=NULL;
   EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *Filesystem=NULL;
   for(UINTN I=0;I<N;++I){EFI_PARTITION_INFO_PROTOCOL *P=NULL;EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *F=NULL;
     if(gBS->HandleProtocol(H[I],&gEfiPartitionInfoProtocolGuid,(VOID **)&P)==EFI_SUCCESS&&P&&P->Type==PARTITION_TYPE_GPT&&
        !StrnCmp(P->Info.Gpt.PartitionName,L"persist",36)&&
        gBS->HandleProtocol(H[I],&gEfiSimpleFileSystemProtocolGuid,(VOID **)&F)==EFI_SUCCESS&&F){
-      Selected=H[I];Filesystem=F;++Found;
+      Filesystem=F;++Found;
     }
   }
   FreePool(H);
   if(Found!=1)return Found?EFI_COMPROMISED_DATA:EFI_NOT_FOUND;
-  mVolumeHandle=Selected;mFs=Filesystem;
+  mFs=Filesystem;
   return EFI_SUCCESS;
 }
 STATIC BOOLEAN Valid(UINT8 *Data,UINTN Bytes){
@@ -75,13 +78,20 @@ STATIC EFI_STATUS ReadSlot(UINT32 Slot,UINT8 **Data,UINTN *Bytes){
 STATIC EFI_STATUS Restore(UINT8 *Data,UINTN Bytes){
   CHAR16 Name[NAME_BYTES/2];
   for(UINTN At=HEADER;At<Bytes;){EFI_GUID Guid;CopyMem(&Guid,Data+At,16);UINT32 N=U32(Data+At+16),Size=U32(Data+At+20),Attr=U32(Data+At+24);
-    CopyMem(Name,Data+At+28,N);EFI_STATUS S=gRT->SetVariable(Name,&Guid,Attr,Size,Data+At+28+N);
+    CopyMem(Name,Data+At+28,N);
+    EFI_STATUS S=gRT->SetVariable(Name,&Guid,Attr,Size,Data+At+28+N);
+    if(S==EFI_SUCCESS && Size==sizeof(UINT16) &&
+       CompareGuid(&Guid,&gEfiGlobalVariableGuid) && !StrCmp(Name,L"BootNext")){
+      UINT16 Next;
+      CopyMem(&Next,Data+At+28+N,sizeof(Next));
+      mRestoredBootNext=Next;
+    }
     if(S!=EFI_SUCCESS&&S!=EFI_WRITE_PROTECTED)return S;At+=28+N+Size;
   }return EFI_SUCCESS;
 }
 STATIC VOID EFIAPI Exit(EFI_EVENT Event,VOID *Context){
   (VOID)Event;(VOID)Context;
-  mExited=TRUE;mProtocol.Frozen=TRUE;mFs=NULL;mVolumeHandle=NULL;
+  mExited=TRUE;mProtocol.Frozen=TRUE;mFs=NULL;
 }
 EFI_STATUS PianoNvFileStart(VOID){
   if(mExited)return EFI_UNSUPPORTED;if(mStarted)return EFI_ALREADY_STARTED;EFI_STATUS S=Volume();if(S!=EFI_SUCCESS)return S;
@@ -92,12 +102,29 @@ EFI_STATUS PianoNvFileStart(VOID){
   if(Best!=MAX_UINT32){mActive=Best;mSequence=U64(Data[Best]+24);S=Restore(Data[Best],Bytes[Best]);}
   else S=R[0]==EFI_NOT_FOUND&&R[1]==EFI_NOT_FOUND?EFI_SUCCESS:EFI_VOLUME_CORRUPTED;
   for(UINTN I=0;I<2;++I)if(Data[I])FreePool(Data[I]);if(S!=EFI_SUCCESS)return S;
+  EFI_FILE_PROTOCOL *Root=NULL;
+  S=mFs->OpenVolume(mFs,&Root);
+  if(S!=EFI_SUCCESS)return S;
+  UINT8 Buffer[SIZE_OF_EFI_FILE_SYSTEM_INFO+sizeof(L"persist")];
+  UINTN Size=sizeof(Buffer);
+  S=Root->GetInfo(Root,&gEfiFileSystemInfoGuid,&Size,Buffer);
+  EFI_STATUS CloseStatus=Root->Close(Root);
+  if(S!=EFI_SUCCESS)return S;
+  if(CloseStatus!=EFI_SUCCESS)return CloseStatus;
+  if(Size<SIZE_OF_EFI_FILE_SYSTEM_INFO)return EFI_VOLUME_CORRUPTED;
+  if(((EFI_FILE_SYSTEM_INFO *)(VOID *)Buffer)->ReadOnly)return EFI_WRITE_PROTECTED;
   S=gBS->CreateEventEx(EVT_NOTIFY_SIGNAL,TPL_NOTIFY,Exit,NULL,&gEfiEventExitBootServicesGuid,&mExit);if(S!=EFI_SUCCESS)return S;
   S=gBS->InstallProtocolInterface(&mHandle,&mGuid,EFI_NATIVE_INTERFACE,&mProtocol);
   if(S!=EFI_SUCCESS){gBS->CloseEvent(mExit);mExit=NULL;return S;}
   mStarted=TRUE;mSavedChanges=mProtocol.Changes;
   DEBUG((DEBUG_WARN,"PIANO_NV_FILE_START status=%r sequence=%lu backend=persist boot_services_only=1\n",S,mSequence));return S;
 }
+
+BOOLEAN PianoNvFileCanConsumeBootNext(UINT16 Number) {
+  // A request restored from an unwritable snapshot would run again next boot.
+  return (mStarted && mSaveError==EFI_SUCCESS) || mRestoredBootNext!=Number;
+}
+
 STATIC EFI_STATUS Collect(UINT8 *Data,UINTN *Bytes){
   CHAR16 Name[NAME_BYTES/2]={0};EFI_GUID Guid={0};UINTN At=HEADER;
   for(UINTN Count=0;Count<4096;++Count){UINTN N=sizeof(Name);EFI_STATUS S=gRT->GetNextVariableName(&N,Name,&Guid);
@@ -110,11 +137,19 @@ STATIC EFI_STATUS Collect(UINT8 *Data,UINTN *Bytes){
   }return EFI_OUT_OF_RESOURCES;
 }
 EFI_STATUS PianoNvFileSave(BOOLEAN Freeze){
-  if(mExited)return EFI_UNSUPPORTED;if(!mStarted)return EFI_NOT_STARTED;if(mUnavailable)return EFI_DEVICE_ERROR;
+  if(mExited)return EFI_UNSUPPORTED;if(!mStarted)return EFI_NOT_STARTED;
   if(mProtocol.Frozen)return Freeze?EFI_SUCCESS:EFI_NOT_READY;if(mBusy)return EFI_NOT_READY;
+  if(mSaveError!=EFI_SUCCESS){
+    if(!Freeze || !PianoNvFileSaveOptionalError(mSaveError))return mSaveError;
+    // Filesystem close and UFS retirement must still prove that I/O has stopped.
+    mProtocol.Frozen=TRUE;
+    return EFI_SUCCESS;
+  }
   if(mSavedChanges==mProtocol.Changes&&mSequence){if(Freeze)mProtocol.Frozen=TRUE;return EFI_SUCCESS;}
-  if(mSequence==MAX_UINT64)return EFI_OUT_OF_RESOURCES;mBusy=TRUE;
-  UINT64 Changes=mProtocol.Changes;UINT8 *Data=AllocateZeroPool(LIMIT);UINTN Bytes=0;EFI_STATUS S=Data?Collect(Data,&Bytes):EFI_OUT_OF_RESOURCES;
+  mBusy=TRUE;
+  UINT64 Changes=mProtocol.Changes;
+  UINT8 *Data=mSequence==MAX_UINT64?NULL:AllocateZeroPool(LIMIT);
+  UINTN Bytes=0;EFI_STATUS S=Data?Collect(Data,&Bytes):EFI_OUT_OF_RESOURCES;
   if(S==EFI_SUCCESS){CopyMem(Data,"SUNUEFI-NVRAM-v1",16);W32(Data+16,1);W32(Data+20,(UINT32)Bytes);W64(Data+24,mSequence+1);W32(Data+32,PianoGptCrc32(Data,Bytes));
     EFI_FILE_PROTOCOL *Root=NULL,*Dir=NULL,*F=NULL;S=mFs->OpenVolume(mFs,&Root);
     if(S==EFI_SUCCESS)S=Root->Open(Root,&Dir,L"\\sunuefi",EFI_FILE_MODE_READ|EFI_FILE_MODE_WRITE|EFI_FILE_MODE_CREATE,EFI_FILE_DIRECTORY);
@@ -129,16 +164,10 @@ EFI_STATUS PianoNvFileSave(BOOLEAN Freeze){
     if(S==EFI_SUCCESS){mActive=Slot;++mSequence;mSavedChanges=Changes;if(Freeze)mProtocol.Frozen=TRUE;}
   }
   if(Data){ZeroMem(Data,LIMIT);FreePool(Data);}mBusy=FALSE;
-  if(S!=EFI_SUCCESS)mUnavailable=TRUE;
-  DEBUG((DEBUG_WARN,"PIANO_NV_FILE_SAVE status=%r sequence=%lu frozen=%u\n",S,mSequence,mProtocol.Frozen));return S;
-}
-EFI_STATUS PianoNvFilePreparePartitionWrite(EFI_HANDLE Partition){
-  if(!Partition)return EFI_INVALID_PARAMETER;
-  if(mExited)return EFI_ABORTED;
-  if(!mStarted || Partition!=mVolumeHandle || mProtocol.Frozen)return EFI_SUCCESS;
-  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *Filesystem=NULL;
-  EFI_STATUS Status=gBS->HandleProtocol(Partition,&gEfiSimpleFileSystemProtocolGuid,(VOID **)&Filesystem);
-  if(mExited)return EFI_ABORTED;
-  if(Status!=EFI_SUCCESS || !Filesystem || Filesystem!=mFs)return EFI_MEDIA_CHANGED;
-  return PianoNvFileSave(TRUE);
+  if(S!=EFI_SUCCESS){
+    mSaveError=S;
+    if(Freeze && PianoNvFileSaveOptionalError(S))mProtocol.Frozen=TRUE;
+  }
+  DEBUG((DEBUG_WARN,"PIANO_NV_FILE_SAVE status=%r sequence=%lu frozen=%u\n",S,mSequence,mProtocol.Frozen));
+  return Freeze && PianoNvFileSaveOptionalError(S)?EFI_SUCCESS:S;
 }

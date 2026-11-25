@@ -3,15 +3,19 @@
 import argparse
 import configparser
 import fcntl
-from email.utils import formatdate
 import hashlib
+import http.client
 import json
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
+import tempfile
+import time
+import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +24,7 @@ from build import debian, overlay_release
 from desktop import package_build
 
 CONFIG = ROOT / 'config/mesa.json'
+BUILD_RECIPE_VERSION = 2
 RUNTIME = {'mesa-libgallium', 'libgbm1', 'libgbm-dev', 'libegl-mesa0', 'libglx-mesa0',
            'libgl1-mesa-dri', 'mesa-vulkan-drivers', 'mesa-opencl-icd', 'mesa-teflon-delegate'}
 
@@ -32,6 +37,48 @@ def package_version():
     return overlay_release.debian_version(policy()['debian']['package_version'])
 
 
+def patch_proof():
+    from build_piano_runtime_helpers import source_patches
+
+    return [{'path': path.resolve().relative_to(ROOT).as_posix(), 'sha256': package_build.sha(path)}
+            for path in source_patches(ROOT / policy()['patch_series'])]
+
+
+def quilt_series(patches):
+    return ['sunuefi-' + Path(row['path']).name for row in patches]
+
+
+def patched_source_hashes(patches):
+    """Replay the ordered patches against only the files they change."""
+    if not patches:
+        return {}
+    patch_files = [ROOT / row['path'] for row in patches]
+    prefix = 'mesa-' + policy()['source']['commit'] + '/'
+    with tempfile.TemporaryDirectory(prefix='mesa-patches-') as folder:
+        expected = Path(folder)
+        # git apply skips paths outside the working directory inside a checkout.
+        files = set()
+        for patch in patch_files:
+            diffstat = subprocess.check_output(['git', 'apply', '--numstat', '-z', patch], cwd=expected)
+            entries = iter(diffstat.split(b'\0')[:-1])
+            for entry in entries:
+                name = entry.split(b'\t', 2)[2]
+                files.update([name.decode()] if name else [next(entries).decode(), next(entries).decode()])
+        with tarfile.open(source_archive()) as archive:
+            for name in sorted(files):
+                try:
+                    member = archive.getmember(prefix + name)
+                except KeyError:
+                    continue  # A patch adds this file.
+                member.name = name
+                archive.extract(member, expected, filter='data')
+        for patch in patch_files:
+            subprocess.run(['patch', '--silent', '--batch', '--forward', '--fuzz=0', '-p1', '-i', patch],
+                           cwd=expected, check=True)
+        return {name: package_build.sha(expected / name) if (expected / name).is_file() else None
+                for name in files}
+
+
 def debian_rules(original):
     # Mesa 27 removed the AMD anti-lag layer. Keep every remaining driver and
     # layer, and use the new upstream VRAM-report layer in the same package.
@@ -40,13 +87,11 @@ def debian_rules(original):
     return original.replace('GALLIUM_DEFAULTS = softpipe', 'GALLIUM_DEFAULTS =')
 
 
-def arch_provenance(output, steamos):
+def arch_provenance(output, patches):
     data = policy()
     record = {'official_source': data['source'], 'config_sha256': package_build.sha(CONFIG),
               'producer_sha256': package_build.sha(__file__), 'native_recipe': data['arch'],
-              'recipe_sha256': package_build.sha(output / 'PKGBUILD'), 'patches': []}
-    if steamos:
-        record['patches'] = json.loads((ROOT / 'patches/mesa/27.0/series.json').read_text())['patches']
+              'recipe_sha256': package_build.sha(output / 'PKGBUILD'), 'patches': patches}
     (output / 'SOURCE.json').write_text(json.dumps(record, indent=2) + '\n')
 
 
@@ -66,22 +111,51 @@ def target_identity(root):
         binaries[name] = {'version': row['Version'], 'source': source,
                           'source_version': version, 'sha256': row['SHA256']}
     return debian.TargetIdentity({'suite': 'sid', 'architecture': 'arm64',
-        'sources': {'mesa': data['debian']['recipe_source_version']},
+        'sources': {'mesa': data['debian']['recipe']['version']},
         'binaries': binaries, 'libraries': libraries}, root)
 
 
+def transient_download_error(error):
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in (408, 429, 500, 502, 503, 504)
+    if isinstance(error, urllib.error.URLError):
+        error = error.reason
+    return (isinstance(error, (TimeoutError, ConnectionError, http.client.IncompleteRead)) or
+            (isinstance(error, socket.gaierror) and error.errno == socket.EAI_AGAIN))
+
+
 def download(url, destination, digest, size=None):
-    if not destination.is_file():
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        partial = destination.with_suffix(destination.suffix + '.partial')
-        with urllib.request.urlopen(url, timeout=120) as stream, partial.open('wb') as target:
-            shutil.copyfileobj(stream, target)
-        if package_build.sha(partial) != digest or (size and partial.stat().st_size != size):
-            raise ValueError('Mesa source or recipe checksum mismatch: ' + destination.name)
-        partial.replace(destination)
-    if package_build.sha(destination) != digest or (size and destination.stat().st_size != size):
-        raise ValueError('Mesa source or recipe checksum mismatch: ' + destination.name)
-    return destination
+    def verify(path):
+        if (size is not None and path.stat().st_size != size) or package_build.sha(path) != digest:
+            raise ValueError(f'Mesa source or recipe checksum mismatch: {destination.name} ({url})')
+
+    if destination.is_file():
+        verify(destination)
+        return destination
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(3):
+        try:
+            with tempfile.TemporaryDirectory(prefix='download-', dir=destination.parent) as temporary:
+                partial = Path(temporary) / destination.name
+                with urllib.request.urlopen(url, timeout=120) as stream, partial.open('wb') as target:
+                    length = stream.headers.get('Content-Length', '')
+                    shutil.copyfileobj(stream, target, 1024 * 1024)
+                # With sized reads, urllib may not raise on a truncated body.
+                if length.isdecimal() and partial.stat().st_size < int(length):
+                    raise ConnectionError('Incomplete HTTP response body')
+                verify(partial)
+                partial.replace(destination)
+            return destination
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError, ConnectionError) as error:
+            if isinstance(error, urllib.error.HTTPError):
+                error.close()
+            if attempt == 2 or not transient_download_error(error):
+                raise OSError(f'Cannot download Mesa input from {url}: {error}') from error
+            wait = 15 * (attempt + 1)
+            print(f'Mesa download from {url} failed: {error}; retrying in {wait}s '
+                  f'({attempt + 2}/3).', flush=True)
+            time.sleep(wait)
 
 
 def copy_unchanged(source, destination):
@@ -93,6 +167,16 @@ def source_archive():
     data = policy()['source']
     return download(data['url'], ROOT / 'build/source-cache/mesa-27/mesa.tar.gz',
                     data['sha256'], data['size'])
+
+
+def subproject_archive(pin, output=None):
+    url = pin['url']
+    name = url.rsplit('/', 1)[-1]
+    cache = ROOT / 'build/source-cache/mesa-27' / name
+    destination = cache if output is None else output / name
+    if destination != cache and not destination.is_file():
+        copy_unchanged(download(url, cache, pin['sha256']), destination)
+    return download(url, destination, pin['sha256'])
 
 
 def extract_source(destination):
@@ -118,7 +202,7 @@ def subprojects(work):
         destination = work / 'subprojects' / wrap['wrap-git']['directory']
         if destination.is_dir():
             continue
-        archive = download(pin['url'], ROOT / 'build/source-cache/mesa-27' / pin['url'].rsplit('/', 1)[-1], pin['sha256'])
+        archive = subproject_archive(pin)
         destination.mkdir()
         with tarfile.open(archive) as stream:
             prefix = stream.getnames()[0] + '/'
@@ -149,33 +233,40 @@ def package_identity(path):
         ['dpkg-deb', '-f', path, 'Package', 'Version', 'Architecture']).splitlines())
 
 
-def packaging_source(root, output, log):
-    from desktop import debian_package as signed
-    version = policy()['debian']['recipe_source_version']
-    cache = output / 'archives/mesa'
-    cache.mkdir(parents=True, exist_ok=True)
-    checksums = debian.source_checksums(root, {'mesa': version})['mesa']
-    if not all((cache / name).is_file() and package_build.sha(cache / name) == row['sha256']
-               for name, row in checksums.items()):
-        debian.command(root, {}, cache, ['apt-get', 'source', '--download-only', '--only-source',
-                                        'mesa=' + version], log)
-    origin = signed.verify_source(root, cache, 'mesa', version)
-    archive = next(row['file'] for row in origin['archives'] if '.debian.tar.' in row['file'])
-    with tarfile.open(cache / archive) as source:
+def packaging_origin():
+    pin = policy()['debian']['recipe']
+    version = pin['version']
+    return {'package': 'mesa', 'version': version, 'suite': 'sid',
+            'url': pin['url'], 'archives': [{'file': f'mesa_{version}.debian.tar.xz',
+                                             'sha256': pin['sha256'], 'size': pin['size']}]}
+
+
+def packaging_matches(origin):
+    return all(origin.get(key) == value for key, value in packaging_origin().items())
+
+
+def packaging_source(output):
+    # Only the packaging recipe is used; build dependencies come from current sid.
+    origin = packaging_origin()
+    archive, = origin['archives']
+    path = download(origin['url'], output / 'archives/mesa' / archive['file'],
+                    archive['sha256'], archive['size'])
+    with tarfile.open(path) as source:
         recipe = {name: source.extractfile(name).read() for name in ('debian/rules', 'debian/control')}
-    origin['archives'] = [origin.pop('dsc'), *origin['archives']]
     origin['recipe'] = {name: hashlib.sha256(data).hexdigest() for name, data in recipe.items()}
-    return origin, recipe
+    return path, origin, recipe
 
 
 def reusable(output, target=None):
     try:
         record = json.loads((output / 'SOURCE.json').read_text())
+        patches = patch_proof()
         if (record.get('package_version') != package_version() or
-                record.get('official_source') != policy()['source'] or record.get('patches') != [] or
+                record.get('official_source') != policy()['source'] or record.get('patches') != patches or
+                record.get('source_patch_series') != quilt_series(patches) or
                 record.get('producer_sha256') != package_build.sha(__file__) or
                 record.get('config_sha256') != package_build.sha(CONFIG) or
-                record.get('build_recipe_version') != 1 or
+                record.get('build_recipe_version') != BUILD_RECIPE_VERSION or
                 record.get('compiler_environment_sha256') != package_build.sha(package_build.__file__) or
                 set(record.get('packages', {})) != RUNTIME or (output / '.incomplete').exists()):
             return None
@@ -191,14 +282,9 @@ def reusable(output, target=None):
                     continue
                 if built_version != target['libraries'][name]['version']:
                     return None
-        root = getattr(target, 'root', output / 'builder/rootfs')
-        source_checksums = debian.source_checksums(root, {'mesa': policy()['debian']['recipe_source_version']})
-        expected = {row['file']: {'sha256': row['sha256'], 'size': row['size']}
-                    for row in record['source']['archives']}
-        if expected != source_checksums['mesa']:
+        if not packaging_matches(record['source']):
             return None
-        signed_packaging = next(row for row in record['source']['archives'] if '.debian.tar.' in row['file'])
-        if record.get('packaging_archive_sha256') != signed_packaging['sha256']:
+        if record.get('packaging_archive_sha256') != record['source']['archives'][0]['sha256']:
             return None
         if Path(record['changes']['file']).name != record['changes']['file']:
             return None
@@ -227,14 +313,37 @@ def tree_hashes(work):
             path.name != 'VERSION' and path.suffix not in ('.pyc',)}
 
 
-def verify_official_source(work, proof):
+def source_file_matches(path, digest):
+    return not path.exists() if digest is None else path.is_file() and package_build.sha(path) == digest
+
+
+def verify_official_source(work, proof, changed=None):
     if proof['official_source'] != policy()['source']:
         raise ValueError('Existing Mesa source differs from the configured official commit')
-    for name, digest in proof['files'].items():
-        if name.startswith('subprojects/'):
+    changed = changed or {}
+    for name, digest in (proof['files'] | changed).items():
+        if name.startswith('subprojects/') and name not in changed:
             continue  # Debian's standard cargo-registry preparation rewrites wraps.
-        if package_build.sha(work / name) != digest:
+        if not source_file_matches(work / name, digest):
             raise ValueError('Official Mesa source changed after extraction: ' + name)
+
+
+def prepare_debian(work, archive, version, patches, reset):
+    if reset:
+        if (work / 'debian').exists():
+            shutil.rmtree(work / 'debian')
+        with tarfile.open(archive) as packaging:
+            packaging.extractall(work, filter='data')
+        # The signed recipe targets Debian's release source, not the development pin.
+        patch_dir = work / 'debian/patches'
+        if patch_dir.exists():
+            shutil.rmtree(patch_dir)
+    debian.add_patches(work, [ROOT / row['path'] for row in patches], 'mesa', version,
+                       'Fix Freedreno scanout buffers for heights not divisible by four.')
+    series = (work / 'debian/patches/series').read_text().strip().splitlines()
+    if series != quilt_series(patches):
+        raise ValueError('Prepared Debian Mesa quilt series differs from the selected patches')
+    return series
 
 
 def build(output, sysroot, jobs, resume=False):
@@ -251,38 +360,39 @@ def build(output, sysroot, jobs, resume=False):
 
 def build_package(output, sysroot, jobs, resume):
     data = policy()
+    version = package_version()
+    patches = patch_proof()
     target = target_identity(sysroot or Path('/'))
     if cached := reusable(output, target):
         return cached
     with debian.builder(output, sysroot) as (root, env), (output / 'build.log').open('a') as log:
         (output / '.incomplete').write_text('Mesa package build has not completed.\n')
         debian.dependencies(root, log, resume)
-        origin, original_recipe = packaging_source(root, output, log)
+        archive, origin, original_recipe = packaging_source(output)
         work = output / 'mesa-27/source'
+        stamp = work.parent / 'SOURCE.json'
         if not work.exists():
             work.mkdir(parents=True)
             extract_source(work)
-            (work.parent / 'SOURCE.json').write_text(json.dumps({
+            stamp.write_text(json.dumps({
                 'official_source': data['source'], 'files': tree_hashes(work)}, indent=2) + '\n')
-        proof = json.loads((work.parent / 'SOURCE.json').read_text())
+        proof = json.loads(stamp.read_text())
+        if (work / '.pc/.dpkg-source-unapply').exists():
+            # dpkg-buildpackage may have been interrupted after applying quilt.
+            debian.command(root, {}, work, ['dpkg-source', '--after-build', '.'], log)
         verify_official_source(work, proof)
-        if not (work / 'debian/changelog').exists() or (work / 'debian/changelog').read_text().split('(', 1)[1].split(')', 1)[0] != package_version():
-            packaging = next(row['file'] for row in origin['archives'] if '.debian.tar.' in row['file'])
-            if (work / 'debian').exists():
-                shutil.rmtree(work / 'debian')
-            with tarfile.open(output / 'archives/mesa' / packaging) as archive:
-                archive.extractall(work, filter='data')
-            patch_folder = work / 'debian/patches'
-            if patch_folder.exists():
-                shutil.rmtree(patch_folder)
-            changelog = work / 'debian/changelog'
-            changelog.write_text(f'mesa ({package_version()}) sid; urgency=medium\n\n'
-                '  * Package the shared official Mesa development source without source patches.\n\n'
-                ' -- Project SunUEFI <sunuefi@users.noreply.github.com>  ' + formatdate(localtime=False) +
-                '\n\n' + changelog.read_text())
-        generated_version = package_version().split('-', 1)[0].replace('~', '-')
+        producer = package_build.sha(__file__)
+        recipe = {'package_version': version, 'patches': patches, 'producer_sha256': producer,
+                  'packaging_archive_sha256': origin['archives'][0]['sha256']}
+        reset = proof.get('recipe') != recipe
+        resume = resume and not reset
+        changes = work.parent / f'mesa_{version}_arm64.changes'
+        if not resume:
+            changes.unlink(missing_ok=True)
+        series = prepare_debian(work, archive, version, patches, reset)
+        generated_version = version.split('-', 1)[0].replace('~', '-')
         if (work / 'VERSION').read_text().strip() not in (
-                data['source']['version'], package_version(), generated_version):
+                data['source']['version'], version, generated_version):
             raise ValueError('Existing Mesa source differs; preserve it and use a fresh output')
         for name in ('rules', 'control'):
             expected = original_recipe['debian/' + name].decode()
@@ -307,12 +417,16 @@ def build_package(output, sysroot, jobs, resume):
             env = dict(env, CC=package_build.GUEST_TOOLS + '/bin/clang',
                 CXX=package_build.GUEST_TOOLS + '/bin/clang++', LIBCLANG_PATH=f'/usr/lib/llvm-{llvm}/lib',
                 BINDGEN_EXTRA_CLANG_ARGS=f'-resource-dir=/usr/lib/llvm-{llvm}/lib/clang/{llvm}')
-        changes = work.parent / f'mesa_{package_version()}_arm64.changes'
+        if reset:
+            proof['recipe'] = recipe
+            stamp.write_text(json.dumps(proof, indent=2) + '\n')
         if not resume or not changes.is_file():
+            debian.command(root, {}, work, ['dpkg-source', '--before-build', '.'], log)
+            verify_official_source(work, proof, patched_source_hashes(patches))
             debian.build(root, env, work, jobs, log, architecture_only=True,
                           resume=resume and (work / 'build/meson-private/coredata.dat').is_file())
-        packages = debian.collect(output, work.parent, RUNTIME, package_version())
         verify_official_source(work, proof)
+        packages = debian.collect(output, work.parent, RUNTIME, version)
         wanted = {row['file'] for row in packages.values()}
         for stale in (output / 'runtime').glob('*.deb'):
             if stale.name not in wanted:
@@ -321,22 +435,22 @@ def build_package(output, sysroot, jobs, resume):
         shutil.copy2(changes, receipt)
         record = {'official_source': data['source'], 'source': origin, 'target': dict(target),
             'official_source_verification': data['source_verification'],
-            'package_version': package_version(), 'packages_built': True, 'patches': [],
+            'package_version': version, 'packages_built': True, 'patches': patches,
             'packages': packages, 'config_sha256': package_build.sha(CONFIG),
-            'producer_sha256': package_build.sha(__file__),
+            'producer_sha256': producer,
             'build_packages': debian.build_packages(root),
             'runtime_dependencies': debian.runtime_dependencies(output, packages),
             'build_command': ['dpkg-buildpackage', '-B', '-us', '-uc', '-j' + str(jobs)],
             'debian_rules_sha256': package_build.sha(work / 'debian/rules'),
             'install_manifests': {path.name: package_build.sha(path) for path in (work / 'debian').glob('*.install')},
             'compiler_environment_sha256': package_build.sha(package_build.__file__),
-            'build_recipe_version': 1,
+            'build_recipe_version': BUILD_RECIPE_VERSION,
             'subprojects': data.get('subprojects', {}),
             'source_files_sha256': hashlib.sha256(json.dumps(proof['files'], sort_keys=True).encode()).hexdigest(),
-            'source_patch_series': [],
+            'source_patch_series': series,
             'changes': {'file': receipt.name, 'sha256': package_build.sha(receipt)},
-            'packaging_archive_sha256': next(row['sha256'] for row in origin['archives'] if '.debian.tar.' in row['file']),
-            'recipe': 'original Debian rules and control with official unpatched Mesa source'}
+            'packaging_archive_sha256': origin['archives'][0]['sha256'],
+            'recipe': 'original Debian rules and control with the shared Mesa patch series'}
         debian.write_manifest(output, record)
         (output / '.incomplete').unlink()
         return record
@@ -344,6 +458,7 @@ def build_package(output, sysroot, jobs, resume):
 
 def arch_recipe(output, steamos=False):
     data = policy()
+    patches = patch_proof()
     output.mkdir(parents=True, exist_ok=True)
     archive = source_archive()
     copy_unchanged(archive, output / 'mesa.tar.gz')
@@ -377,16 +492,22 @@ def arch_recipe(output, steamos=False):
             wrap_text = source.extractfile('mesa-' + data['source']['commit'] + '/subprojects/' + name + '.wrap').read().decode()
         wrap_config = configparser.ConfigParser()
         wrap_config.read_string(wrap_text)
-        subarchive = download(pin['url'], output / pin['url'].rsplit('/', 1)[-1], pin['sha256'])
+        subarchive = subproject_archive(pin, output)
         with tarfile.open(subarchive) as stream:
             root_name = stream.getnames()[0]
         recipe += '\nsource+=("' + subarchive.name + '")\n'
         recipe += 'sha256sums+=(' + pin['sha256'] + ')\n'
         recipe += 'b2sums+=(' + hashlib.blake2b(subarchive.read_bytes()).hexdigest() + ')\n'
         prepare += '  mv "' + root_name + '" "mesa-$_pkgver/subprojects/' + wrap_config['wrap-git']['directory'] + '"\n'
+    for row in patches:
+        patch = ROOT / row['path']
+        copy_unchanged(patch, output / patch.name)
+        recipe += '\nsource+=("' + patch.name + '")\nsha256sums+=(' + row['sha256'] + ')\n'
+        recipe += 'b2sums+=(' + hashlib.blake2b(patch.read_bytes()).hexdigest() + ')\n'
+        prepare += '  patch --batch --fuzz=0 -Np1 -d "mesa-$_pkgver" < "' + patch.name + '"\n'
     if not steamos:
         (output / 'PKGBUILD').write_text(recipe + '\n' + prepare + '}\n')
-        arch_provenance(output, False)
+        arch_provenance(output, patches)
         return output
     with tarfile.open(archive) as source:
         text = source.extractfile('mesa-' + data['source']['commit'] + '/subprojects/wayland-protocols.wrap').read().decode()
@@ -394,15 +515,6 @@ def arch_recipe(output, steamos=False):
     protocols.read_string(text)
     wrap = protocols['wrap-file']
     download(wrap['source_url'], output / wrap['source_filename'], wrap['source_hash'])
-    patches = json.loads((ROOT / 'patches/mesa/27.0/series.json').read_text())['patches']
-    for row in patches:
-        patch = ROOT / 'patches/mesa/27.0' / row['file']
-        if package_build.sha(patch) != row['sha256']:
-            raise ValueError('SteamOS Mesa patch checksum mismatch')
-        shutil.copy2(patch, output / row['file'])
-        recipe += "\nsource+=(" + row['file'] + ")\nsha256sums+=(" + row['sha256'] + ")\n"
-        recipe += 'b2sums+=(' + hashlib.blake2b((output / row['file']).read_bytes()).hexdigest() + ')\n'
-        prepare += '  patch --batch --fuzz=0 -Np1 -d "mesa-$_pkgver" < "' + row['file'] + '"\n'
     recipe += '\nsource+=("' + wrap['source_filename'] + '")\n'
     recipe += 'sha256sums+=(' + wrap['source_hash'] + ')\n'
     recipe += 'b2sums+=(' + hashlib.blake2b((output / wrap['source_filename']).read_bytes()).hexdigest() + ')\n'
@@ -426,7 +538,7 @@ def arch_recipe(output, steamos=False):
     recipe += '\npackage() {\n  meson install -C build --destdir "$pkgdir" --no-rebuild --skip-subprojects\n'
     recipe += '  install -Dm644 "mesa-$_pkgver/docs/license.rst" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"\n}\n'
     (output / 'PKGBUILD').write_text(recipe)
-    arch_provenance(output, True)
+    arch_provenance(output, patches)
     return output
 
 

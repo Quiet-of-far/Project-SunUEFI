@@ -19,53 +19,103 @@ from rootfs.arch import guest_environment
 from rootfs.common import build_resolver
 from build import overlay_release
 from desktop import package_build
+from package.archive import pacman_identity
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def patch_series(package_version):
-    version = package_version.split(':')[-1]
-    if re.match(r'^8\.1(?:\.\d+)?-', version):
+    version, _, release = package_version.rsplit(':', 1)[-1].rpartition('-')
+    if release and re.fullmatch(r'8\.1(?:\.\d+)?', version):
         return ROOT / 'linux/bsp/patches/ffmpeg/series-8.json'
-    if re.match(r'^9\.0\.2-', version):
-        return ROOT / 'patches/ffmpeg/9.0.2/series.json'
+    if release and re.fullmatch(r'9\.\d+(?:\.\d+)?', version):
+        series = ROOT / 'patches/ffmpeg' / version / 'series.json'
+        if series.is_file():
+            return series
     raise ValueError('Port the BSP fixes to the installed FFmpeg ABI before replacing ' + package_version)
 
 
-def is_current(output):
+def source_series(package_version):
+    path = patch_series(package_version)
+    series = json.loads(path.read_text())
+    upstream = package_version.split(':')[-1].rsplit('-', 1)[0]
+    if upstream != series['upstream_version']:
+        raise ValueError(f"Installed FFmpeg {package_version} needs source {upstream}; "
+                         f"the patch series is for {series['upstream_version']}")
+    return path, series
+
+
+def installed_package(root):
+    dbpath = subprocess.check_output(['chroot', root, 'pacman-conf', 'DBPath'], text=True).strip()
+    records = [path for path in (root / dbpath.lstrip('/') / 'local').glob('ffmpeg-*/desc')
+               if '%NAME%\nffmpeg\n' in path.read_text()]
+    if len(records) != 1:
+        raise ValueError('Expected one installed FFmpeg package record')
+    text = records[0].read_text()
+    files = records[0].with_name('files').read_text().splitlines()
+
+    def field(name):
+        return text.split('%' + name + '%\n', 1)[1].split('\n\n', 1)[0].splitlines()
+
+    return {'version': field('VERSION')[0], 'depends': field('DEPENDS'),
+            'provides': field('PROVIDES'), 'qt_faststart': 'usr/bin/qt-faststart' in files}
+
+
+def installed_options(root):
+    banner = subprocess.check_output(['chroot', root, 'ffmpeg', '-version'],
+                                     text=True, stderr=subprocess.STDOUT)
+    # Diagnostics may precede the banner on native ARM hosts.
+    banner = re.sub(r'\x1b\[[0-9;]*m', '', banner)
+    line = next((line for line in banner.splitlines() if line.startswith('configuration:')), None)
+    if line is None:
+        raise ValueError('Installed FFmpeg does not report its configure options')
+    return shlex.split(line.split(':', 1)[1])
+
+
+def is_current(output, root):
     try:
         record = json.loads((output / 'SOURCE.json').read_text())
-        series_path = patch_series(record['upstream_version'] + '-1')
-        series = json.loads(series_path.read_text())
+        target = installed_package(root)
+        recorded_target = record['target_package']
+        if target != recorded_target and target != {**recorded_target, 'version': record['package_version']}:
+            return False
+        series_path, series = source_series(target['version'])
         origin = series['source']
         archive = (next(row for row in origin['archives'] if row['filename'].endswith('.orig.tar.xz'))
                    if 'archives' in origin else origin)
         patches = [{'path': str((series_path.parent / row['path']).resolve().relative_to(ROOT)),
                     'sha256': row['sha256']} for row in series['series']]
-        return (record['local_revision'] == series['local_revision'] and
+        return (record['upstream_version'] == series['upstream_version'] and
+                record['local_revision'] == series['local_revision'] and
                 record.get('overlay_release') == overlay_release.generation() and
                 record['archive_sha256'] == archive['sha256'] and
                 record['patches'] == patches and
                 all(source.sha(ROOT / row['path']) == row['sha256'] for row in patches) and
                 Path(record['package']).name == record['package'] and
                 source.sha(output / record['package']) == record['package_sha256'] and
-                (output / 'manifest.json').is_file())
-    except (OSError, KeyError, ValueError, json.JSONDecodeError):
+                (output / 'manifest.json').is_file() and
+                installed_options(root) == record['original_configuration'])
+    except (OSError, IndexError, KeyError, TypeError, ValueError, subprocess.SubprocessError):
         return False
 
 
-def package_recipe(version, epoch, pkgrel, options, deps, provides):
+def package_recipe(version, epoch, pkgrel, options, deps, provides, *, qt_faststart):
     quote_array = lambda values: '(' + ' '.join(shlex.quote(v) for v in values) + ')'
+    build_tools = "  make tools/qt-faststart\n" if qt_faststart else ""
+    install_tools = ('  install -Dm755 tools/qt-faststart "$pkgdir/usr/bin/qt-faststart"\n'
+                     if qt_faststart else '')
     return (
         f"pkgname=ffmpeg\npkgver={version}\npkgrel={pkgrel}\n"
         f"epoch={epoch}\npkgdesc='FFmpeg with Piano stateful V4L2 fixes'\n"
         "arch=(aarch64)\nurl=https://ffmpeg.org\nlicense=(GPL-3.0-or-later)\n"
         "options=(!debug !lto)\n"
         f"depends={quote_array(deps)}\nprovides={quote_array(provides)}\n"
-        "build() {\n  cd \"$startdir/ffmpeg-source\"\n  ./configure " +
-        shlex.join(options) + "\n  make\n}\n"
+        "build() {\n  cd \"$startdir/ffmpeg-source\"\n"
+        f"  ./configure {shlex.join(options)}\n  make\n{build_tools}"
+        "}\n"
         "package() {\n  cd \"$startdir/ffmpeg-source\"\n"
         "  make DESTDIR=\"$pkgdir\" install\n"
+        f"{install_tools}"
         "  install -Dm644 COPYING.GPLv3 \"$pkgdir/usr/share/licenses/ffmpeg/COPYING.GPLv3\"\n}\n")
 
 
@@ -75,26 +125,12 @@ def build(root, output, resume=False):
         raise ValueError('Use root and a disposable project rootfs')
     if (output.exists() and not resume) or not output.is_relative_to(ROOT / 'build'):
         raise ValueError('Use a new output below build/')
-    installed = subprocess.check_output(['chroot', root, 'ffmpeg', '-version'],
-                                        text=True, stderr=subprocess.STDOUT)
-    # Diagnostics may precede the banner on native ARM hosts. Version/ABI
-    # decisions belong to pacman's package record, not banner formatting.
-    installed = re.sub(r'\x1b\[[0-9;]*m', '', installed)
-    line = next(line for line in installed.splitlines() if line.startswith('configuration:'))
-    options = shlex.split(line.split(':', 1)[1])
-    dbpath = subprocess.check_output(['chroot', root, 'pacman-conf', 'DBPath'], text=True).strip()
-    records = list((root / dbpath.lstrip('/') / 'local').glob('ffmpeg-*/desc'))
-    records = [p for p in records if '%NAME%\nffmpeg\n' in p.read_text()]
-    if len(records) != 1:
-        raise ValueError('Expected one installed FFmpeg package record')
-    text = records[0].read_text()
-    def field(name):
-        return text.split('%' + name + '%\n', 1)[1].split('\n\n', 1)[0].splitlines()
-    deps, provides = field('DEPENDS'), field('PROVIDES')
-    package_version = field('VERSION')[0]
+    target_package = installed_package(root)
+    options = installed_options(root)
+    deps, provides = target_package['depends'], target_package['provides']
+    package_version = target_package['version']
     upstream_version = package_version.split(':')[-1]
-    series_path = patch_series(package_version)
-    series = json.loads(series_path.read_text())
+    series_path, series = source_series(package_version)
     version = series['upstream_version']
     # Retain Arch's package release ordering while identifying our rebuild.
     release = upstream_version.rsplit('-', 1)[1]
@@ -119,12 +155,14 @@ def build(root, output, resume=False):
     guest_work.mkdir(parents=True, exist_ok=resume)
     if not (guest_work / 'ffmpeg-source').exists():
         shutil.copytree(output / 'source', guest_work / 'ffmpeg-source')
-    recipe = package_recipe(version, epoch, pkgrel, options, deps, provides)
+    recipe = package_recipe(version, epoch, pkgrel, options, deps, provides,
+                            qt_faststart=target_package['qt_faststart'])
     (guest_work / 'PKGBUILD').write_text(recipe)
     with build_resolver(root), guest_environment(root) as guest:
         dependencies = ['base-devel', 'clang', 'ccache',
                'nasm', 'amf-headers', 'avisynthplus', 'ffnvcodec-headers',
                'frei0r-plugins', 'ladspa', 'opencl-headers', 'vulkan-headers',
+               *series.get('pacman_makedepends', ()),
                *deps]
         # SteamOS retains some base-only packages and virtual soname
         # dependencies. Do not ask the repository to reinstall satisfied ones.
@@ -149,6 +187,7 @@ def build(root, output, resume=False):
         if len(packages) != 1:
             raise ValueError('FFmpeg package was not produced')
         package = packages[0]
+        _, built_version, _ = pacman_identity(package)
         guest(['pacman', '-U', '--noconfirm', '/var/tmp/sunuefi-ffmpeg/' + package.name])
         version = guest(['ffmpeg', '-version'], capture_output=True, text=True).stdout
         if series['upstream_version'] not in version:
@@ -157,6 +196,7 @@ def build(root, output, resume=False):
     shutil.copy2(package, output / package.name)
     provenance.update(package_format='pacman', packages_built=True, original_configuration=options,
                       package=package.name, package_sha256=source.sha(package),
+                      target_package=target_package, package_version=built_version,
                       overlay_release=overlay_release.generation(),
                       installed_version=version, device_verified=False)
     (output / 'SOURCE.json').write_text(json.dumps(provenance, indent=2) + '\n')

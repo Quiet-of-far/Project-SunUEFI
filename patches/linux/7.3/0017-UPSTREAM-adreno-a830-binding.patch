@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jie Zhang <jie.zhang@oss.qualcomm.com>
+Date: Sun, 9 Aug 2026 01:53:09 +0530
+Subject: [PATCH] dt-bindings: display/msm: Document Adreno 830 GPU/GMU
+
+Adreno 830 GPU present in SM8750 chipset belongs to the A8x family of
+Adreno GPU. It is similar to Adreno 840 GPU with some meaningful
+differences like GMEM , register file size etc.
+
+Document Adreno 830 GPU and GMU present in the SM8750 chipset.
+
+Signed-off-by: Jie Zhang <jie.zhang@oss.qualcomm.com>
+Signed-off-by: Akhil P Oommen <akhilpo@oss.qualcomm.com>
+Reviewed-by: Krzysztof Kozlowski <krzysztof.kozlowski@oss.qualcomm.com>
+Patchwork: https://patchwork.freedesktop.org/patch/745129/
+Message-ID: <20260809-pakala-gpu-v1-2-207ad1fac1c7@oss.qualcomm.com>
+Signed-off-by: Rob Clark <robin.clark@oss.qualcomm.com>
+Link: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=ab20121e021588b634671958f7caa346bfa69621
+---
+ Documentation/devicetree/bindings/display/msm/gmu.yaml | 4 +++-
+ Documentation/devicetree/bindings/display/msm/gpu.yaml | 2 ++
+ 2 files changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/devicetree/bindings/display/msm/gmu.yaml b/Documentation/devicetree/bindings/display/msm/gmu.yaml
+index 9e459f12ce3f57e2d239d9d8a8b90242251ad0f3..f1e609b7e1c7e7a717594a9cea53bca7b21d8d0c 100644
+--- a/Documentation/devicetree/bindings/display/msm/gmu.yaml
++++ b/Documentation/devicetree/bindings/display/msm/gmu.yaml
+@@ -305,7 +305,9 @@ allOf:
+       properties:
+         compatible:
+           contains:
+-            const: qcom,adreno-gmu-810.0
++            enum:
++              - qcom,adreno-gmu-810.0
++              - qcom,adreno-gmu-830.1
+     then:
+       properties:
+         reg:
+diff --git a/Documentation/devicetree/bindings/display/msm/gpu.yaml b/Documentation/devicetree/bindings/display/msm/gpu.yaml
+index e5efe2d35ddcce30e83ec14f8771e79c2cb28603..1c4a6f17c1bf783bce72fe4d43aa99e3fba23d20 100644
+--- a/Documentation/devicetree/bindings/display/msm/gpu.yaml
++++ b/Documentation/devicetree/bindings/display/msm/gpu.yaml
+@@ -414,6 +414,7 @@ allOf:
+           contains:
+             enum:
+               - qcom,adreno-44010000
++              - qcom,adreno-44050001
+               - qcom,adreno-44050a01
+               - qcom,adreno-44070001
+     then:
+@@ -451,6 +452,7 @@ allOf:
+               - qcom,adreno-43050c01
+               - qcom,adreno-43051401
+               - qcom,adreno-44010000
++              - qcom,adreno-44050001
+               - qcom,adreno-44050a01
+               - qcom,adreno-44070001
+ 

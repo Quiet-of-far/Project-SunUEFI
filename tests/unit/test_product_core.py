@@ -39,7 +39,8 @@ class ProductCoreTests(unittest.TestCase):
                     ROOT / 'uefi/components/nv', ROOT / 'uefi/components/reset',
                      ROOT / 'uefi/handoff/early-memory', ROOT / 'uefi/components/pogo-product',
                      ROOT / 'uefi/components/touch-product', mirror]
-        includes += [ROOT / 'uefi/components/board-identity', ROOT / 'uefi/components/rtc']
+        includes += [ROOT / 'uefi/components/board-identity', ROOT / 'uefi/components/rtc',
+                     ROOT / 'uefi/components/ext4']
         includes = sorted(path for path in app.iterdir() if path.is_dir()) + includes
         compiled = subprocess.run(
             ['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-Wno-misleading-indentation',
@@ -67,5 +68,5 @@ class ProductCoreTests(unittest.TestCase):
     def test_boot_fallback_requires_clean_handoff_and_yields_to_usb(self):
         self.run_case('boot-fallback')
 
-    def test_error_screen_keeps_usb_and_prepares_storage_before_reset(self):
+    def test_error_screen_keeps_usb_and_retires_owners_before_reset(self):
         self.run_case('error-diagnostics')

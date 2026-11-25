@@ -8,6 +8,7 @@
 #include <PiDxe.h>
 #include <Guid/GlobalVariable.h>
 #include <Protocol/FirmwareVolume2.h>
+#include <Protocol/LoadFile.h>
 #include <Protocol/SimpleFileSystem.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/UefiRuntimeServicesTableLib.h>
@@ -172,35 +173,41 @@ STATIC EFI_STATUS RunOption(EFI_HANDLE Parent,EFI_BOOT_MANAGER_LOAD_OPTION *Opti
     if(Path)FreePool(Path);
     Path=Next;
     if(!Path)break;
+    if(!IsDevicePathValid(Path,0)){Status=EFI_COMPROMISED_DATA;continue;}
     EFI_DEVICE_PATH_PROTOCOL *Remaining=Path;
-    EFI_HANDLE Volume=NULL;
+    EFI_HANDLE Source=NULL;
     Status=gBS->LocateDevicePath(Menu?&gEfiFirmwareVolume2ProtocolGuid:&gEfiSimpleFileSystemProtocolGuid,
-                                 &Remaining,&Volume);
+                                 &Remaining,&Source);
+    if(!Menu && Status==EFI_NOT_FOUND){
+      Remaining=Path;
+      Status=gBS->LocateDevicePath(&gEfiLoadFileProtocolGuid,&Remaining,&Source);
+    }
     if(Status!=EFI_SUCCESS)continue;
-    if(!Volume){Status=EFI_NOT_FOUND;continue;}
+    if(!Source){Status=EFI_NOT_FOUND;continue;}
     if(Menu && (!PianoBootOptionIsSimpleInit(Path) || !IsFvFile(Remaining,&mPianoSimpleInitBootFileGuid)))continue;
     if(!Menu && Dispatch->PrepareSystem) {
-      Status=Dispatch->PrepareSystem();
+      Status=Dispatch->PrepareSystem(Path);
       if(Status!=EFI_SUCCESS){
         Dispatch->SystemBlocked=TRUE;
         Attempts->TryNext=FALSE;
         break;
       }
     }
-    *Device=Menu?NULL:Volume;
+    *Device=Menu?NULL:Source;
     mOptionNumber=Option->OptionNumber;
     UINT16 Current=(UINT16)Option->OptionNumber;
     Status=gRT->SetVariable(L"BootCurrent",&gEfiGlobalVariableGuid,
       EFI_VARIABLE_BOOTSERVICE_ACCESS|EFI_VARIABLE_RUNTIME_ACCESS,sizeof(Current),&Current);
     if(Status!=EFI_SUCCESS){
+      if(!Menu && Dispatch->FinishSystem)Dispatch->FinishSystem();
       Attempts->TryNext=FALSE;
       break;
     }
     EfiSignalEventReadyToBoot();
     BOOLEAN Automatic=IsAutomatic(Option);
     Application->StartCalled=FALSE;
-    Status=PianoApplicationRunPath(Parent,Volume,Path,Automatic?NULL:Option->OptionalData,
-      Automatic?0:Option->OptionalDataSize,0x10000000,Application);
+    Status=PianoApplicationRunPath(Parent,Source,Path,Automatic?NULL:Option->OptionalData,
+      Automatic?0:Option->OptionalDataSize,0x10000000,Menu?NULL:Dispatch->WatchdogExpired,Application);
     if(Application->StartCalled){
       if(Menu)Dispatch->StartedMenu=TRUE;
       else Dispatch->StartedSystem=TRUE;
@@ -209,6 +216,7 @@ STATIC EFI_STATUS RunOption(EFI_HANDLE Parent,EFI_BOOT_MANAGER_LOAD_OPTION *Opti
       Attempts->TryNext=FALSE;
       return Status;
     }
+    if(!Menu && Dispatch->FinishSystem)Dispatch->FinishSystem();
     EFI_STATUS Clear=gRT->SetVariable(L"BootCurrent",&gEfiGlobalVariableGuid,0,0,NULL);
     if(Clear!=EFI_SUCCESS && Clear!=EFI_NOT_FOUND){
       Status=Clear;
@@ -265,18 +273,31 @@ EFI_STATUS PianoStartBootOption(EFI_HANDLE Parent,EFI_HANDLE *Device,
   if(Dispatch->Selection==PianoBootAutomatic) {
     UINTN Bytes=sizeof(Next);
     Status=gRT->GetVariable(L"BootNext",&gEfiGlobalVariableGuid,NULL,&Bytes,&Next);
-    if(Status!=EFI_NOT_FOUND && (Status!=EFI_SUCCESS || Bytes!=sizeof(Next)))
-      return mOptionStatus=Status==EFI_SUCCESS?EFI_COMPROMISED_DATA:Status;
+    // Like BDS, ignore an invalid one-time choice without changing BootOrder.
+    if(Status==EFI_BUFFER_TOO_SMALL || (Status==EFI_SUCCESS && Bytes!=sizeof(Next)))
+      Status=EFI_NOT_FOUND;
+    else if(Status!=EFI_SUCCESS && Status!=EFI_NOT_FOUND)
+      return mOptionStatus=Status;
+    if(Status==EFI_SUCCESS && !PianoNvFileCanConsumeBootNext(Next)) {
+      DEBUG((DEBUG_WARN,"PIANO_BOOT_NEXT_DEFERRED number=%04x reason=nv_file_not_writable\n",Next));
+      Status=EFI_NOT_FOUND;
+    }
   }
   if(Status==EFI_SUCCESS) {
     // Persist deletion before loading the once-only target, even if it hangs.
     Status=gRT->SetVariable(L"BootNext",&gEfiGlobalVariableGuid,0,0,NULL);
-    if(Status!=EFI_SUCCESS)return mOptionStatus=Status;
-    Status=PianoNvFileSave(FALSE);
-    if(Status!=EFI_SUCCESS && Status!=EFI_NOT_STARTED)return mOptionStatus=Status;
-    Status=RunNumber(Parent,Next,Device,Application,Dispatch,&Attempts);
-    TriedNext=TRUE;
-    if(!Attempts.TryNext)return mOptionStatus=Status;
+    if(Status==EFI_SUCCESS){
+      Status=PianoNvFileSave(FALSE);
+      if(Status==EFI_SUCCESS || Status==EFI_NOT_STARTED){
+        Status=RunNumber(Parent,Next,Device,Application,Dispatch,&Attempts);
+        TriedNext=TRUE;
+        if(!Attempts.TryNext)return mOptionStatus=Status;
+      }else if(!PianoNvFileSaveOptionalError(Status)){
+        return mOptionStatus=Status;
+      }
+    }
+    if(!TriedNext)
+      DEBUG((DEBUG_WARN,"PIANO_BOOT_NEXT_DEFERRED number=%04x status=%r\n",Next,Status));
   }
   UINTN Count=0;
   EFI_BOOT_MANAGER_LOAD_OPTION *Options=EfiBootManagerGetLoadOptions(&Count,LoadOptionTypeBoot);

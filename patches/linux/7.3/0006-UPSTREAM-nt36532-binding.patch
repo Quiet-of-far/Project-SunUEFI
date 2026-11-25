@@ -1,0 +1,107 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Junjie Cao <junjie.cao@linux.dev>
+Date: Tue, 4 Aug 2026 00:39:20 -0700
+Subject: [PATCH] dt-bindings: display: panel: Add Novatek NT36532
+
+NT36532 is a driver IC used to drive MIPI-DSI panels. It is found
+in OnePlus Pad 2 tablets with CSOT panels.
+
+Signed-off-by: Junjie Cao <junjie.cao@linux.dev>
+Acked-by: Conor Dooley <conor.dooley@microchip.com>
+Signed-off-by: Neil Armstrong <neil.armstrong@linaro.org>
+Link: https://patch.msgid.link/20260804073920.85191-1-junjie.cao@linux.dev
+Link: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=1c523f0a930107191c95d96340c69a295a086e5a
+---
+ .../display/panel/novatek,nt36532.yaml        | 83 +++++++++++++++++++
+ 1 file changed, 83 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/display/panel/novatek,nt36532.yaml
+
+diff --git a/Documentation/devicetree/bindings/display/panel/novatek,nt36532.yaml b/Documentation/devicetree/bindings/display/panel/novatek,nt36532.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..c1ab793dd718d0b0d7eca652c082a68e10d11390
+--- /dev/null
++++ b/Documentation/devicetree/bindings/display/panel/novatek,nt36532.yaml
+@@ -0,0 +1,83 @@
++# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/display/panel/novatek,nt36532.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Novatek NT36532 based DSI display Panels
++
++maintainers:
++  - Junjie Cao <junjie.cao@linux.dev>
++
++description: |
++  The NT36532 IC from Novatek is a Driver IC used to drive MIPI-DSI panels.
++
++allOf:
++  - $ref: panel-common-dual.yaml#
++
++properties:
++  compatible:
++    items:
++      - enum:
++          - csot,ppc100hb1-1
++      - const: novatek,nt36532
++
++  reg:
++    maxItems: 1
++
++  reset-gpios:
++    maxItems: 1
++    description: phandle of gpio for reset line - This should be 8mA
++
++  vddio-supply:
++    description: regulator that supplies the I/O voltage
++
++  ports: true
++
++required:
++  - compatible
++  - reg
++  - vddio-supply
++  - reset-gpios
++  - ports
++
++unevaluatedProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/gpio/gpio.h>
++
++    dsi {
++        #address-cells = <1>;
++        #size-cells = <0>;
++
++        panel@0 {
++            compatible = "csot,ppc100hb1-1", "novatek,nt36532";
++            reg = <0>;
++
++            reset-gpios = <&tlmm 133 GPIO_ACTIVE_LOW>;
++
++            vddio-supply = <&vreg_l12b_1p8>;
++
++            ports {
++                #address-cells = <1>;
++                #size-cells = <0>;
++
++                port@0 {
++                    reg = <0>;
++                    panel_in_0: endpoint {
++                        remote-endpoint = <&dsi0_out>;
++                    };
++                };
++
++                port@1 {
++                    reg = <1>;
++                    panel_in_1: endpoint {
++                        remote-endpoint = <&dsi1_out>;
++                    };
++                };
++            };
++        };
++    };
++
++...
