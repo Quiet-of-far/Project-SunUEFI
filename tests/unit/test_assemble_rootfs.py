@@ -56,6 +56,19 @@ class AssembleTests(unittest.TestCase):
                 self.assertEqual(count.read_text(), str(expected))
                 self.assertEqual(sleep.call_count, expected - 1)
 
+    def test_missing_archive_refreshes_indexes_before_retrying_full_upgrade(self):
+        log = self.root / 'build.log'
+        script = (
+            'import sys; '
+            'sys.exit("error: failed retrieving file from mirror.example : returned error: 404\\n"'
+            ' "warning: failed to retrieve some files\\n"'
+            ' "Errors occurred, no packages were upgraded.") if sys.argv[1] == "-Syu" '
+            'else print(sys.argv[1])'
+        )
+        with patch.object(tool.time, 'sleep'), patch.object(sys, 'stderr', io.StringIO()):
+            tool.run_logged([sys.executable, '-c', script, '-Syu'], log, retry_downloads=True)
+        self.assertEqual(log.read_text().splitlines()[-1], '-Syyu')
+
     def args(self, distro='arch', desktop='niri', *extra):
         return tool.parser().parse_args(['--distro', distro, '--desktop', desktop, '--plan', *extra])
 

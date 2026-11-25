@@ -1,6 +1,7 @@
 {
   "base_url": "https://ca.us.mirror.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz",
   "base_sha256": null,
+  "pacman_build_mirror": "https://mirrors.dotsrc.org/archlinuxarm",
   "base_policy": "Verify the official detached signature using a pinned public keyring, or require an explicit SHA256; pacman package signatures remain required.",
   "desktop": "niri",
   "architecture": "aarch64",

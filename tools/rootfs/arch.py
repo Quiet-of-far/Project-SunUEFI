@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import urllib.request
 
-from build_chroot import bind_devices, remove_pacman_sockets, stop_helpers
+from build_chroot import bind_devices, pacman_build_config, remove_pacman_sockets, stop_helpers
 from rootfs.common import digest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -60,9 +60,7 @@ def guest_environment(root):
         (root / 'dev').mkdir(exist_ok=True)
         devices.enter_context(bind_devices(root, run))
         (root / 'dev/fd').symlink_to('/proc/self/fd')
-        text = (root / 'etc/pacman.conf').read_text()
-        (root / 'run/pacman-build.conf').write_text(
-            re.sub(r'^\s*CheckSpace\s*$', '# CheckSpace (build chroot)', text, flags=re.M))
+        (root / 'run/pacman-build.conf').write_text(pacman_build_config(root))
         help_text = subprocess.check_output(
             ['chroot', root, 'pacman', '-S', '--help'], text=True)
         sandbox_args = ['--disable-sandbox'] if '--disable-sandbox' in help_text else []

@@ -15,7 +15,7 @@ import sys
 import tarfile
 import time
 from urllib.parse import urlsplit
-from build_chroot import bind_devices, guest_command, stop_helpers
+from build_chroot import bind_devices, guest_command, pacman_build_config, stop_helpers
 from build_piano_ram_bootstrap import guest_resolve
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,17 +38,23 @@ def run_logged(args, log, *, retry_downloads=False, **kwargs):
         with log.open('rb') as stream:
             stream.seek(start)
             output = stream.read().decode(errors='replace')
-        retryable = ('failed to retrieve some files' in output and
-                     'Errors occurred, no packages were upgraded.' in output and
-                     re.search(r'^error: failed retrieving file .* : .*'
-                               r'(?:Operation too slow|timed out|Could not resolve host|'
-                               r'Failed to connect|Connection reset|returned error: 5[0-9]{2})',
-                               output, re.M))
-        if not retryable or attempt == 2:
+        uncommitted_fetch = ('failed to retrieve some files' in output and
+                             'Errors occurred, no packages were upgraded.' in output)
+        retryable = uncommitted_fetch and re.search(
+            r'^error: failed retrieving file .* : .*'
+            r'(?:Operation too slow|timed out|Could not resolve host|'
+            r'Failed to connect|Connection reset|returned error: 5[0-9]{2})',
+            output, re.M)
+        refresh = uncommitted_fetch and ('-Syu' in argv or '-Syyu' in argv) and re.search(
+            r'^error: failed retrieving file .* : .*returned error: 404\b', output, re.M)
+        if not (retryable or refresh) or attempt == 2:
             print('\n'.join(output.splitlines()[-35:]), file=sys.stderr, flush=True)
             raise failure
+        if refresh and '-Syu' in argv:
+            argv = ['-Syyu' if arg == '-Syu' else arg for arg in argv]
         delay = 5 * (attempt + 1)
-        print(f'Arch package download failed. Retrying the transaction in {delay}s.',
+        action = 'Refreshing repository indexes and retrying' if refresh else 'Retrying the transaction'
+        print(f'Arch package download failed. {action} in {delay}s.',
               file=sys.stderr, flush=True)
         time.sleep(delay)
 
@@ -308,10 +314,8 @@ def execute(result):
         conf = root / 'etc/pacman.conf'; text = conf.read_text()
         if not re.search(r'^\s*SigLevel\s*=\s*Required\b', text, re.M) or re.search(r'^\s*SigLevel\s*=.*Never', text, re.M): raise ValueError('Pacman repository signatures must remain required')
         conf.write_text(re.sub(r'^\s*Architecture\s*=.*$', 'Architecture = aarch64', text, flags=re.M))
-        # libalpm cannot resolve the host mount table's paths from a
-        # chroot. Leave the installed CheckSpace policy unchanged.
         (root / 'run/pacman-build.conf').write_text(
-            re.sub(r'^\s*CheckSpace\s*$', '# CheckSpace (build chroot)', conf.read_text(), flags=re.M))
+            pacman_build_config(root, mirror=result.get('pacman_build_mirror')))
         guest(['pacman-key', '--init']); guest(['pacman-key', '--populate', 'archlinuxarm']); guest(['pacman', '-Syu', '--noconfirm'])
         packages = profile['base_packages'] + result['desktop_profile'][manager + '_packages']; optional = []
         for package in packages + result['desktop_profile'].get('optional_packages', []):

@@ -180,7 +180,9 @@ def build(args):
             '--distro', 'arch', '--desktop', 'niri', '--execute',
             '--output', str(output), '--base-file', str(archive),
             '--base-url', cfg['base_url'], '--base-sha256', base_hash])
-        assemble_rootfs.execute(assemble_rootfs.plan(options))
+        plan = assemble_rootfs.plan(options)
+        plan['pacman_build_mirror'] = cfg['pacman_build_mirror']
+        assemble_rootfs.execute(plan)
     elif not root.is_dir():
         raise ValueError('Existing output has no assembled rootfs')
 
@@ -231,6 +233,7 @@ def build(args):
         bootstrap_sysroot=args.bootstrap_sysroot, desktop='niri'))
     record = json.loads((output / 'manifest.json').read_text())
     record.update(base_archive_sha256=base_hash, arch_niri_inputs=cfg,
+                  pacman_build_mirror=cfg['pacman_build_mirror'],
                   ffmpeg=json.loads((ffmpeg / 'SOURCE.json').read_text()))
     (output / 'manifest.json').write_text(json.dumps(record, indent=2) + '\n')
     if access:
