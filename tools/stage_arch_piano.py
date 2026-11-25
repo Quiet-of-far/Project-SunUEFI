@@ -97,6 +97,12 @@ def stage(args):
     }, None, [])
     put(root, 'home/piano/.config/niri/config.kdl',
         (root / 'etc/skel/.config/niri/config.kdl').read_text())
+    thunar_defaults = root / 'etc/skel/.config/Thunar/uca.xml'
+    thunar_user = root / 'home/piano/.config/Thunar/uca.xml'
+    if thunar_defaults.is_file() and not (thunar_user.exists() or thunar_user.is_symlink()):
+        put(root, str(thunar_user.relative_to(root)), thunar_defaults.read_text())
+    put(root, 'usr/local/bin/piano-niri-rotate',
+        (ROOT / 'linux/desktops/niri/piano-niri-rotate').read_text(), 0o755)
     for name in ('config.jsonc', 'style.css'):
         put(root, 'home/piano/.config/waybar/' + name,
             (root / 'etc/skel/.config/waybar' / name).read_text())

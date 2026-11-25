@@ -16,6 +16,10 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def protect_mesa_packages(root):
     """Keep repository upgrades from replacing the board's patched GPU drivers."""
+    protect_packages(root, ('mesa', 'vulkan-freedreno'))
+
+
+def protect_packages(root, packages):
     path = root / 'etc/pacman.conf'
     if path.is_symlink():
         raise ValueError('Refuse a symlink for the guest pacman configuration')
@@ -36,10 +40,10 @@ def protect_mesa_packages(root):
             ignored.update(text.split('=', 1)[1].split())
     if options is None:
         raise ValueError('Pacman options section is missing')
-    missing = [name for name in ('mesa', 'vulkan-freedreno') if name not in ignored]
+    missing = [name for name in packages if name not in ignored]
     if missing:
         rows.insert(options + 1,
-                    '# Preserve the Piano Adreno 830v1 driver until its patched replacement is available.\n'
+                    '# Preserve the Piano hardware packages until patched replacements are available.\n'
                     'IgnorePkg = ' + ' '.join(missing) + '\n')
         path.write_text(''.join(rows))
 
@@ -120,8 +124,20 @@ def sensor_sources(output, cfg):
     shutil.copytree(source, output, ignore=shutil.ignore_patterns('.git'))
     rows = []
     for name in cfg['patches']:
-        run(['patch', '--batch', '--forward', '-p1', '-i', ROOT / name], cwd=output)
-        rows.append({'path': name, 'sha256': digest(ROOT / name)})
+        path = ROOT / name
+        series = path.parent.parent / 'series.json'
+        packages = ('libssc', 'iio-sensor-proxy')
+        if path.parent.name in packages and series.is_file():
+            row = next((entry for entry in json.loads(series.read_text())['patches']
+                        if entry['file'] == f'{path.parent.name}/{path.name}'), {})
+            if row.get('source_package') != path.parent.name or row.get('sha256') != digest(path):
+                raise ValueError('Invalid sensor package patch: ' + name)
+            directory = output / 'patches' / path.parent.name
+            directory.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, directory / path.name)
+        else:
+            run(['patch', '--batch', '--forward', '-p1', '-i', path], cwd=output)
+        rows.append({'path': name, 'sha256': digest(path)})
     (output / 'SOURCE').write_text(json.dumps(
         {'source_url': cfg['source_url'], 'source_commit': commit, 'patches': rows}, indent=2) + '\n')
 

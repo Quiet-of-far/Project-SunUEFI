@@ -13,6 +13,9 @@
         "greetd",
         "greetd-tuigreet",
         "foot",
+        "thunar",
+        "xdg-terminal-exec",
+        "python-gobject",
         "fuzzel",
         "wofi",
         "waybar",
@@ -39,7 +42,7 @@
       "scale_percent": 200,
       "scale_scope": "not applied; set per-output niri scale after display mode is verified",
       "osk": "Squeekboard starts with niri; hardware interaction remains unverified",
-      "rotation": "unverified; no automatic rotation service configured"
+      "rotation": "Opt-in niri helper uses the standard SensorProxy accelerometer."
     }
   },
   "meaning": "Arch Linux ARM + niri is the supported product. The builder validates packages and configuration; its manifest does not claim a device boot."

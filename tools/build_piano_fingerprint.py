@@ -22,10 +22,8 @@ HEADERS = (
 )
 CLI_SOURCE = NATIVE / 'piano-goodix-cli.c'
 LICENSES = ('BSD-3-Clause.txt', 'BSD-3-Clause-Clear.txt')
-ARCH_DESKTOP_DEPENDENCIES = {
-    'libfprint': ('glib2', 'libgusb', 'libgudev', 'pixman', 'openssl'),
-    'fprintd': ('libfprint', 'dbus', 'dbus-glib', 'polkit', 'pam'),
-}
+ARCH_LIBFPRINT_DEPENDENCIES = ('glibc', 'libgcc', 'glib2', 'libgusb', 'libgudev', 'pixman', 'openssl')
+ARCH_LIBFPRINT_RECIPE = ROOT / 'linux/bsp/arch/libfprint/PKGBUILD.in'
 RUNTIME_PATHS = {
     'usr/local/sbin/piano-fingerprint-ctl',
     'usr/share/piano-provenance/fingerprint.json',
@@ -227,101 +225,77 @@ def backend_sources(runtime):
 
 
 def desktop_recipes(output, runtime):
-    """Build the local libfprint backend and fprintd against the target distro ABI."""
-    cfg = json.loads((ROOT / 'config/fingerprint.json').read_text())['desktop']
+    """Build libfprint against Arch's ABI. Get fprintd from the distro."""
+    config = json.loads((ROOT / 'config/fingerprint.json').read_text())
+    record = config['desktop']['libfprint']
+    recipe = output / 'libfprint'
+    recipe.mkdir(parents=True, exist_ok=True)
+    upstream = source('libfprint', record)
+    archive = recipe / 'libfprint.tar'
+    subprocess.run(['git', '-C', upstream, 'archive', '--format=tar', '--prefix=libfprint/',
+                    '--output=' + str(archive.resolve()), record['commit']], check=True)
+    patch_names = []
+    for path, expected in patches(record):
+        if digest(path) != expected:
+            raise ValueError('Fingerprint desktop patch changed: ' + str(path))
+        shutil.copy2(path, recipe / path.name)
+        patch_names.append(path.name)
     backend = backend_sources(runtime)
-    output.mkdir(parents=True, exist_ok=True)
-    for name, record in cfg.items():
-        recipe = output / name
-        recipe.mkdir(exist_ok=True)
-        upstream = source(name, record)
-        archive = recipe / (name + '.tar')
-        subprocess.run(['git', '-C', upstream, 'archive', '--format=tar',
-                        '--prefix=' + name + '/', '--output=' + str(archive.resolve()),
-                        record['commit']], check=True)
-        patch_names = []
-        for path, expected in patches(record):
-            if digest(path) != expected:
-                raise ValueError('Fingerprint desktop patch changed: ' + str(path))
-            shutil.copy2(path, recipe / path.name)
-            patch_names.append(path.name)
-        local = ['piano-goodix-sources.tar'] if name == 'libfprint' else []
-        for filename in local:
-            shutil.copy2(backend, recipe / filename)
-        files = [archive.name, *patch_names, *local]
-        quoted = lambda values: ' '.join(shlex.quote(str(value)) for value in values)
-        dependencies = ARCH_DESKTOP_DEPENDENCIES[name]
-        prepare = ''.join('  patch -d "$srcdir/' + name + '" -p1 < "$srcdir/' + p + '"\n'
-                          for p in patch_names)
-        options = ('-Ddoc=false -Dgtk-examples=false -Dinstalled-tests=false '
-                   '-Dudev_rules_dir=/usr/lib/udev/rules.d -Dudev_hwdb=disabled'
-                   if name == 'libfprint' else '-Dgtk_doc=false -Dman=false')
-        if name == 'libfprint':
-            prepare += '''  mkdir -p "$srcdir/libfprint/libfprint/drivers/piano-goodix"
-  tar -xf "$srcdir/piano-goodix-sources.tar" -C "$srcdir/libfprint/libfprint/drivers/piano-goodix"
-'''
-        notices = ''
-        if name == 'libfprint':
-            notices = '''  install -Dm644 "$srcdir/libfprint/libfprint/drivers/piano-goodix/BSD-3-Clause.txt" "$pkgdir/usr/share/licenses/libfprint/piano-goodix-BSD-3-Clause.txt"
-  install -Dm644 "$srcdir/libfprint/libfprint/drivers/piano-goodix/BSD-3-Clause-Clear.txt" "$pkgdir/usr/share/licenses/libfprint/piano-goodix-BSD-3-Clause-Clear.txt"
-  install -Dm644 "$srcdir/libfprint/libfprint/drivers/piano-goodix/qcbor/LICENSE" "$pkgdir/usr/share/licenses/libfprint/piano-goodix-QCBOR.txt"
-  install -Dm644 "$srcdir/libfprint/libfprint/drivers/piano-goodix/uapi/linux/tee.h" "$pkgdir/usr/share/licenses/libfprint/piano-goodix-linux-tee.h"
-'''
-        recipe_text = (
-            f'pkgname={name}\npkgver={record["version"]}\npkgrel=1.1\n'
-            'arch=(aarch64)\nlicense=(LGPL-2.1-or-later)\n'
-            f'pkgdesc="{name} with Piano fingerprint support"\n'
-            f'url={record["url"]}\ndepends=({quoted(dependencies)})\n'
-            'makedepends=(base-devel meson ninja glib2-devel gobject-introspection python-docutils perl)\n'
-            'options=(!lto !debug)\n'
-            + ('noextract=(piano-goodix-sources.tar)\n' if name == 'libfprint' else '') +
-            f'source=({quoted(files)})\nsha256sums=({quoted(digest(recipe / f) for f in files)})\n'
-            'prepare() {\n' + (prepare or '  :\n') + '}\n'
-            'build() {\n' + f'  meson setup build {name} --prefix=/usr --libdir=lib '
-            f'--buildtype=release {options}\n  meson compile -C build -j4\n}}\n'
-            'package() {\n  DESTDIR="$pkgdir" meson install -C build\n' + notices + '}\n')
-        (recipe / 'PKGBUILD').write_text(recipe_text)
-    return cfg
+    shutil.copy2(backend, recipe / backend.name)
+    files = [archive.name, *patch_names, backend.name]
+    text = ARCH_LIBFPRINT_RECIPE.read_text()
+    values = {
+        'VERSION': record['version'], 'RELEASE': config['arch']['package_release'],
+        'SOURCES': shlex.join(files), 'CHECKSUMS': shlex.join(digest(recipe / f) for f in files),
+        'PATCHES': shlex.join(patch_names), 'DEPENDENCIES': shlex.join(ARCH_LIBFPRINT_DEPENDENCIES),
+        'OPTIONS': 'options=(!debug !lto)\n',
+    }
+    for name, value in values.items():
+        text = text.replace(f'@{name}@', value)
+    (recipe / 'PKGBUILD').write_text(text)
+    return recipe
 
 
 def install_desktop(root, runtime, output):
     import build_arch_package
-    from rootfs.arch import guest_environment
+    from rootfs.arch import guest_environment, protect_packages
     from rootfs.common import build_resolver
 
     root, runtime, output = root.resolve(), runtime.resolve(), output.resolve()
     if (not root.is_relative_to(ROOT / 'build/distros') or
             not output.is_relative_to(ROOT / 'build') or output.is_relative_to(root)):
         raise ValueError('Build fingerprint packages outside a project-built target rootfs')
-    recipes = output / 'recipes'
-    desktop_recipes(recipes, runtime)
-    for name in ('libfprint', 'fprintd'):
-        required = ('glibc', *ARCH_DESKTOP_DEPENDENCIES[name])
-        missing = subprocess.run(['chroot', root, 'pacman', '-T', *required],
-                                 capture_output=True, text=True)
-        if missing.returncode not in (0, 127):
-            raise RuntimeError(missing.stderr)
-        if missing.returncode:
-            with build_resolver(root), guest_environment(root) as guest:
-                guest(['pacman', '-S', '--needed', '--noconfirm', *missing.stdout.splitlines()])
-        packages = output / name
-        cohort = subprocess.check_output(
-            ['chroot', root, 'pacman', '-Q', *required], text=True)
-        inputs = {'recipe_sha256': build_arch_package.recipe_sha256(recipes / name / 'PKGBUILD'),
-                  'runtime_packages': cohort}
-        if not (packages / 'manifest.json').is_file():
-            build_arch_package.build(root, recipes / name, packages)
-            updated = subprocess.check_output(
-                ['chroot', root, 'pacman', '-Q', *required], text=True)
-            if updated != cohort:
-                raise ValueError('Fingerprint build dependencies changed the target ABI; rebuild the packages')
-            (packages / 'fingerprint-inputs.json').write_text(json.dumps(inputs, indent=2) + '\n')
-        else:
-            marker = packages / 'fingerprint-inputs.json'
-            if not marker.is_file() or json.loads(marker.read_text()) != inputs:
-                raise ValueError('Fingerprint package sources or target ABI changed; use a fresh output')
-            build_arch_package.install_cached(root, packages)
+    recipe = desktop_recipes(output / 'recipes', runtime)
+    required = ARCH_LIBFPRINT_DEPENDENCIES
+    with build_resolver(root), guest_environment(root) as guest:
+        guest(['pacman', '-S', '--needed', '--noconfirm', *required])
+    packages = output / 'libfprint'
+    cohort = subprocess.check_output(['chroot', root, 'pacman', '-Q', *required], text=True)
+    inputs = {'recipe_sha256': build_arch_package.recipe_sha256(recipe / 'PKGBUILD'),
+              'runtime_packages': cohort}
+    marker = packages / 'fingerprint-inputs.json'
+    if not (packages / 'manifest.json').is_file():
+        build_arch_package.build(root, recipe, packages)
+        updated = subprocess.check_output(['chroot', root, 'pacman', '-Q', *required], text=True)
+        if updated != cohort:
+            raise ValueError('Fingerprint build dependencies changed the target ABI; rebuild the packages')
+        marker.write_text(json.dumps(inputs, indent=2) + '\n')
+    else:
+        if not marker.is_file() or json.loads(marker.read_text()) != inputs:
+            raise ValueError('Fingerprint package sources or target ABI changed; use a fresh output')
+        build_arch_package.install_cached(root, packages)
+    with build_resolver(root), guest_environment(root) as guest:
+        guest(['pacman', '-T', 'libfprint-2.so=2-64'])
+        # Explicit target selects the signed repository build on resumed images too.
+        guest(['pacman', '-S', '--noconfirm', 'extra/fprintd'])
+        unit = (root / 'usr/lib/systemd/system/fprintd.service').read_text()
+        executable = next(line.split('=', 1)[1].split()[0]
+                          for line in unit.splitlines() if line.startswith('ExecStart='))
+        linked = guest(['ldd', '-r', executable], capture_output=True, text=True)
+        if any(message in linked.stdout + linked.stderr for message in ('not found', 'undefined symbol')):
+            raise ValueError('Stock fprintd cannot resolve the adapted libfprint ABI')
     desktop_service(root)
+    protect_packages(root, ('libfprint',))
 
 
 def desktop_service(root):

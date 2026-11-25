@@ -129,11 +129,9 @@ def verify_base(archive, cfg, expected=None):
     return actual
 
 
-def prepare_recipes(inputs, sensors):
+def prepare_recipes(inputs):
     recipes = inputs / 'recipes'
     recipes.mkdir(parents=True, exist_ok=True)
-    if not (recipes / 'fastrpc/PKGBUILD').is_file():
-        sensor_recipes(recipes, sensors)
     mesa = recipes / 'mesa'
     if not (mesa / 'PKGBUILD').is_file():
         from build.arch_mesa import recipe
@@ -189,15 +187,34 @@ def build(args):
     with release.build_resolver(root), guest_environment(root) as guest:
         guest(['pacman', '-S', '--needed', '--noconfirm', *cfg['hardware_packages']])
     inputs = ROOT / 'build/arch-niri-inputs'
-    sensors = inputs / 'sensors'
-    if not sensors.exists():
-        sensor_sources(sensors, policy['sensors'])
-    recipes = prepare_recipes(inputs, sensors)
+    sensor_policy = policy['sensors']
+    sensor_inputs = json.dumps(sensor_policy, sort_keys=True).encode()
+    for name in sensor_policy['patches']:
+        sensor_inputs += bytes.fromhex(release.digest(ROOT / name))
+    sensor_dir = inputs / ('sensors-' + hashlib.sha256(sensor_inputs).hexdigest()[:16])
+    sensors = sensor_dir / 'source'
+    if not (sensors / 'SOURCE').is_file():
+        sensor_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='sensor-source-', dir=sensor_dir) as work:
+            staged = Path(work) / 'source'
+            sensor_sources(staged, sensor_policy)
+            staged.rename(sensors)
+    recipes = prepare_recipes(inputs)
+    sensor_recipe_dir = sensor_dir / 'recipes'
+    if not sensor_recipe_dir.exists():
+        with tempfile.TemporaryDirectory(prefix='sensor-recipes-', dir=sensor_dir) as work:
+            sensor_recipes(Path(work), sensors)
+            Path(work).rename(sensor_recipe_dir)
     from build.arch_mesa import validate as validate_mesa
     for name in ('mesa', 'fastrpc', 'libssc', 'iio-sensor-proxy'):
         packages = output / 'packages' / name
-        if not (packages / 'manifest.json').is_file():
-            build_arch_package.build(root, recipes / name, packages, resume=args.resume,
+        recipe = (recipes if name == 'mesa' else sensor_recipe_dir) / name
+        manifest = packages / 'manifest.json'
+        if manifest.is_file():
+            if json.loads(manifest.read_text())['recipe_sha256'] != build_arch_package.recipe_sha256(recipe / 'PKGBUILD'):
+                raise ValueError('Cached Arch package recipe changed: ' + name + '. Use a fresh output.')
+        else:
+            build_arch_package.build(root, recipe, packages, resume=args.resume,
                                      validate=validate_mesa if name == 'mesa' else None)
 
     ffmpeg = output / 'packages/ffmpeg'

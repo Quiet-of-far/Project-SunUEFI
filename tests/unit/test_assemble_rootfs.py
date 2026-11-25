@@ -103,7 +103,7 @@ class AssembleTests(unittest.TestCase):
         self.assertIn('niri', result['desktop_profile']['arch_packages'])
         self.assertIn('Squeekboard', result['desktop_profile']['osk'])
         self.assertIn('unverified', result['desktop_profile']['osk'])
-        self.assertIn('unverified', result['desktop_profile']['rotation'])
+        self.assertIn('Opt-in', result['desktop_profile']['rotation'])
 
     def test_niri_session_configuration_uses_greetd_without_forced_scaling(self):
         root = self.root / 'build/distros/arch-niri/rootfs'
@@ -111,7 +111,16 @@ class AssembleTests(unittest.TestCase):
         result = {'desktop': 'niri', 'scale_percent': 200,
                   'desktop_profile': {'display_manager': {'arch': 'greetd'}}, 'distro': 'arch'}
         guest = lambda *args, **kwargs: None
+        thunar = root / 'etc/xdg/Thunar/uca.xml'
+        thunar.parent.mkdir(parents=True)
+        thunar.write_text('<actions><action><command>exo-open --working-directory %f '
+                          '--launch TerminalEmulator</command></action></actions>')
         tool.configure_desktop(root, result, guest, [])
+        self.assertIn('xdg-terminal-exec --dir=%f',
+                      (root / 'etc/skel/.config/Thunar/uca.xml').read_text())
+        self.assertIn('TerminalEmulator=piano-terminal',
+                      (root / 'etc/xdg/xfce4/helpers.rc').read_text())
+        self.assertIn('TerminalEmulator', thunar.read_text())
         config = (root / 'etc/skel/.config/niri/config.kdl').read_text()
         self.assertNotIn('scale', config)
         greetd = (root / 'etc/greetd/config.toml').read_text()

@@ -1,0 +1,83 @@
+#!/usr/bin/python3
+"""Rotate Piano's built-in screen from the session's SensorProxy claim."""
+
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+
+from gi.repository import Gio, GLib
+
+
+SENSOR = 'net.hadess.SensorProxy'
+TRANSFORMS = {'normal': 'normal', 'bottom-up': '180',
+              'left-up': '90', 'right-up': '270'}
+
+
+def main():
+    socket = os.environ.get('NIRI_SOCKET')
+    if not socket:
+        sys.exit('Run piano-niri-rotate inside a niri session.')
+
+    loop = GLib.MainLoop()
+    claimed_owner = None
+    applied = None
+
+    def update(proxy, *_):
+        nonlocal claimed_owner, applied
+        owner = proxy.get_name_owner()
+        if owner != claimed_owner:
+            claimed_owner = None
+            applied = None
+        available = proxy.get_cached_property('HasAccelerometer')
+        if not owner or not available or not available.get_boolean():
+            return
+        try:
+            if not claimed_owner:
+                proxy.call_sync('ClaimAccelerometer', None, Gio.DBusCallFlags.NONE, 2000, None)
+                claimed_owner = owner
+            value = proxy.get_cached_property('AccelerometerOrientation')
+            transform = TRANSFORMS.get(value.get_string()) if value else None
+            if transform is None or transform == applied:
+                return
+            outputs = json.loads(subprocess.check_output(['niri', 'msg', '--json', 'outputs'],
+                                                        timeout=2))
+            internal = [name for name in outputs if name.startswith('DSI-')]
+            if len(internal) != 1:
+                return
+            subprocess.run(['niri', 'msg', 'output', internal[0], 'transform', transform],
+                           check=True, timeout=2)
+            applied = transform
+        except (GLib.Error, subprocess.SubprocessError, ValueError) as error:
+            print(f'piano-niri-rotate: {error}', file=sys.stderr)
+
+    proxy = Gio.DBusProxy.new_for_bus_sync(
+        Gio.BusType.SYSTEM, Gio.DBusProxyFlags.NONE, None,
+        SENSOR, '/net/hadess/SensorProxy', SENSOR, None)
+    proxy.connect('g-properties-changed', update)
+    proxy.connect('notify::g-name-owner', update)
+
+    def keep_running():
+        if Path(socket).is_socket():
+            return GLib.SOURCE_CONTINUE
+        loop.quit()
+        return GLib.SOURCE_REMOVE
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, loop.quit)
+    GLib.timeout_add_seconds(2, keep_running)
+    try:
+        update(proxy)
+        loop.run()
+    finally:
+        if claimed_owner and claimed_owner == proxy.get_name_owner():
+            try:
+                proxy.call_sync('ReleaseAccelerometer', None, Gio.DBusCallFlags.NONE, 2000, None)
+            except GLib.Error:
+                pass
+
+
+if __name__ == '__main__':
+    main()

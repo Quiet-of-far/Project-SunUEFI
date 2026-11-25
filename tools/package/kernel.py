@@ -228,9 +228,9 @@ def download_pacman(root, work, packages, guest):
 def install(root, package_format, kernel, *, published=False):
     """Install into a disposable product root using its native package manager."""
     import tempfile
-    from build_release_rootfs import build_devices, build_resolver
+    from rootfs.common import build_resolver
+    from rootfs.arch import guest_environment
     from build_chroot import guest_command
-    from build_nyarch_apps import guest_environment
     root = Path(root).resolve()
     if not root.is_relative_to(ROOT / 'build/distros'):
         raise ValueError('Install only into a generated product root')
@@ -257,6 +257,7 @@ def install(root, package_format, kernel, *, published=False):
             paths.append('/' + (work / name).relative_to(root).as_posix())
         with build_resolver(root):
             if package_format == 'debian':
+                from build_release_rootfs import build_devices
                 with build_devices(root):
                     def apt(*arguments):
                         subprocess.run(guest_command(root, [

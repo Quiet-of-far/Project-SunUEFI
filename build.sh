@@ -18,6 +18,7 @@ case "$command" in
     python3 tools/prepare_release_kernel.py --refresh
     python3 tools/build/kernel.py "$@"
     ;;
+  linux-package) python3 tools/package/kernel.py --format pacman "$@" ;;
   mesa) python3 tools/build/mesa.py "$@" ;;
   sensors) python3 tools/build/sensors.py "$@" ;;
   display-calibration) python3 tools/display/build_output_color.py "$@" ;;
@@ -40,7 +41,7 @@ case "$command" in
   install) python3 tools/install_piano.py "$@" ;;
   installer) python3 tools/export_installer.py "$@" ;;
   help|-h|--help)
-    printf '%s\n' 'Usage: ./build.sh sources|check|uefi|trampoline|module|module-package|boot-request|boot-repack|linux|mesa|sensors|display-calibration|bsp|rootfs|arch-niri-rootfs|package|all|installer|install' \
+    printf '%s\n' 'Usage: ./build.sh sources|check|uefi|trampoline|module|module-package|boot-request|boot-repack|linux|linux-package|mesa|sensors|display-calibration|bsp|rootfs|arch-niri-rootfs|package|all|installer|install' \
       'Full builds need the documented builder environment; rootfs and hardware packages run in a root ARM64 build container.' \
       'Building never partitions or flashes a tablet. install is a separate explicit command.' ;;
   *) printf 'Unknown command: %s\n' "$command" >&2; exit 2 ;;

@@ -7,6 +7,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
@@ -87,84 +88,40 @@ class BuildPianoFingerprintTests(unittest.TestCase):
             marker.write_bytes(original_record)
 
 
-class FingerprintDebianMetadataTests(unittest.TestCase):
-    def test_real_debian_cache_checks_inputs_abi_archive_hash_and_dependencies(self):
-        if not shutil.which('dpkg-deb'):
-            self.skipTest('dpkg-deb is required')
-        with tempfile.TemporaryDirectory(prefix='fingerprint-package-cache-') as directory:
-            root = Path(directory)
-            package = root / 'package'
-            (package / 'DEBIAN').mkdir(parents=True)
-            version = '1:' + json.loads((ROOT / 'config/fingerprint.json').read_text())[
-                'desktop']['libfprint']['version'] + '+sunuefi2'
-            dependencies = 'libc6 (>= 2.38), libgusb2a (>= 0.3.3)'
-            (package / 'DEBIAN/control').write_text(
-                'Package: libfprint-2-2\nVersion: ' + version + '\nArchitecture: arm64\n'
-                'Maintainer: Test <test@example.com>\nDepends: ' + dependencies + '\n'
-                'Description: cache metadata test\n')
-            (package / 'usr/share/doc').mkdir(parents=True)
-            (package / 'usr/share/doc/input').write_bytes(b'cache payload')
-            output = root / 'output'
-            output.mkdir()
-            deb = output / 'libfprint.deb'
-            subprocess.run(['dpkg-deb', '--root-owner-group', '--build', package, deb],
-                           check=True, capture_output=True)
-            archive = root / 'backend.tar'
-            archive.write_bytes(b'backend source archive identity')
-            inputs = {'source': 'generation'}
-            abi = {'packages': {'libc6': '2.43-7'}}
-            record = {'inputs': inputs, 'target_abi': abi,
-                      'backend_sources_sha256': fingerprint.digest(archive),
-                      'dependencies': dependencies,
-                      'package': {'file': deb.name, 'sha256': fingerprint.digest(deb),
-                                  'version': version, 'architecture': 'arm64'}}
-            marker = output / 'SOURCE.json'
-            marker.write_text(json.dumps(record))
-            self.assertEqual(fingerprint.debian_reusable(output, inputs, abi, archive)[1], deb)
-            self.assertIsNone(fingerprint.debian_reusable(output, {'source': 'changed'}, abi, archive))
-            self.assertIsNone(fingerprint.debian_reusable(output, inputs, {'packages': {}}, archive))
-            archive.write_bytes(b'changed archive')
-            self.assertIsNone(fingerprint.debian_reusable(output, inputs, abi, archive))
-            archive.write_bytes(b'backend source archive identity')
-            record['dependencies'] = 'libc6'
-            marker.write_text(json.dumps(record))
-            self.assertIsNone(fingerprint.debian_reusable(output, inputs, abi, archive))
-            record['dependencies'] = dependencies
-            marker.write_text(json.dumps(record))
-            deb.write_bytes(deb.read_bytes() + b'tampered')
-            self.assertIsNone(fingerprint.debian_reusable(output, inputs, abi, archive))
-
-    def test_dpkg_database_identity_rejects_other_architectures_and_missing_packages(self):
-        if not shutil.which('dpkg-query'):
-            self.skipTest('dpkg-query is required')
-        with tempfile.TemporaryDirectory(prefix='fingerprint-package-db-') as directory:
-            root = Path(directory)
-            (root / 'etc').mkdir()
-            (root / 'etc/os-release').write_text('ID=debian\nVERSION_CODENAME=sid\n')
-            database = root / 'var/lib/dpkg'
-            database.mkdir(parents=True)
-
-            def status(architecture, missing=False):
-                packages = fingerprint.DEBIAN_ABI_PACKAGES
-                if missing:
-                    packages = packages[:-1]
-                (database / 'status').write_text(''.join(
-                    f'Package: {name}\nStatus: install ok installed\n'
-                    f'Architecture: {architecture}\nVersion: 1.2-3\n'
-                    'Maintainer: Test <test@example.com>\nDescription: package metadata\n\n'
-                    for name in packages))
-
-            status('arm64')
-            identity = fingerprint.debian_abi(root)
-            self.assertEqual(set(identity['packages']), set(fingerprint.DEBIAN_ABI_PACKAGES))
-            (root / 'etc/os-release').write_text('ID=debian\nVERSION_CODENAME=trixie\n')
-            self.assertNotEqual(fingerprint.debian_abi(root), identity)
-            status('amd64')
-            with self.assertRaisesRegex(ValueError, 'target ABI package'):
-                fingerprint.debian_abi(root)
-            status('arm64', missing=True)
-            with self.assertRaises(subprocess.CalledProcessError):
-                fingerprint.debian_abi(root)
+class ArchLibfprintRecipeTests(unittest.TestCase):
+    def test_recipe_archives_pinned_source_and_provides_daemon_soname(self):
+        with tempfile.TemporaryDirectory() as working:
+            root = Path(working)
+            checkout = root / 'checkout'
+            checkout.mkdir()
+            subprocess.run(['git', 'init', '-q', checkout], check=True)
+            (checkout / 'README').write_text('libfprint source')
+            subprocess.run(['git', '-C', checkout, 'add', 'README'], check=True)
+            subprocess.run(['git', '-C', checkout, '-c', 'user.name=Fixture',
+                            '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'source'], check=True)
+            commit = subprocess.check_output(['git', '-C', checkout, 'rev-parse', 'HEAD'],
+                                             text=True).strip()
+            config = root / 'config'
+            config.mkdir()
+            (config / 'fingerprint.json').write_text(json.dumps({
+                'desktop': {'libfprint': {'commit': commit, 'version': '1.94.100'}},
+                'arch': {'package_release': '2.1'},
+            }))
+            backend = root / 'piano-goodix-sources.tar'
+            backend.write_bytes(b'validated backend')
+            output = root / 'recipes'
+            with patch.object(fingerprint, 'ROOT', root), \
+                    patch.object(fingerprint, 'source', return_value=checkout), \
+                    patch.object(fingerprint, 'backend_sources', return_value=backend):
+                recipe = fingerprint.desktop_recipes(output, root)
+            metadata = subprocess.check_output(['bash', '-ec',
+                'source "$1"; printf "%s\\n" "$pkgname" "${provides[@]}" "${source[@]}"',
+                'read-recipe', recipe / 'PKGBUILD'], text=True).splitlines()
+            self.assertEqual(metadata, ['libfprint', 'libfprint-2.so',
+                                        'libfprint.tar', 'piano-goodix-sources.tar'])
+            self.assertEqual(list(output.iterdir()), [recipe])
+            with tarfile.open(recipe / 'libfprint.tar') as archive:
+                self.assertEqual(archive.extractfile('libfprint/README').read(), b'libfprint source')
 
 
 if __name__ == '__main__':

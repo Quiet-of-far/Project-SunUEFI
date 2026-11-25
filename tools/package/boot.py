@@ -12,6 +12,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 BOOT_SPACE_HOOK = Path(__file__).with_name('85-piano-boot-space.install')
+BOOT_HISTORY_HOOK = Path(__file__).with_name('95-piano-boot-history.install')
 PACMAN_REPOSITORIES = ('sunuefi', 'sunuefi-steamos')
 PUBLIC_REPOSITORY_URL = 'https://sunuefi-repo.okassets.uk'
 
@@ -122,10 +123,19 @@ def add_packages(plan, output, manifest, digest, *, image_modules=()):
             'Suites: sid\nComponents: main\nArchitectures: arm64\n'
             'Signed-By: /usr/share/keyrings/sunuefi-archive-keyring.gpg\n')
     else:
-        dependencies = "'systemd>=258' systemd-ukify mkinitcpio"
+        dependencies = "'systemd>=258' systemd-ukify mkinitcpio python"
+        install[f'usr/lib/kernel/install.d/{BOOT_HISTORY_HOOK.name}'] = BOOT_HISTORY_HOOK.read_text()
+        install['usr/lib/systemd/system/systemd-boot-update.service.d/20-piano-esp.conf'] = (
+            '[Unit]\nAfter=boot-efi.mount\n')
         install['etc/kernel/install.conf'] += 'initrd_generator=mkinitcpio\n'
         install['etc/mkinitcpio.conf.d/zz-piano.conf'] = (
-            'MODULES+=(arm_smmu ufs_qcom phy_qcom_qmp_ufs pinctrl_sm8750)\n'
+            "MODULES+=(arm_smmu ufs_qcom phy_qcom_qmp_ufs pinctrl_sm8750 'hid_nanosic_wn8030?')\n"
+            'for piano_dsp in adsp adsp_dtb cdsp cdsp_dtb; do\n'
+            ' for image in /usr/lib/firmware/$piano_dsp.mdt /usr/lib/firmware/"$piano_dsp".b[0-9][0-9]; do\n'
+            '  [[ ! -f "$image" ]] || FILES+=("$image")\n'
+            ' done\n'
+            'done\n'
+            'unset piano_dsp image\n'
             '# Valve recovery hooks expect Frame storage, firmware, and ADB.\n'
             'piano_hooks=()\n'
             'for piano_hook in "${HOOKS[@]}"; do\n'
@@ -166,13 +176,14 @@ def add_packages(plan, output, manifest, digest, *, image_modules=()):
             '  usr/lib/modules/*/vmlinuz|usr/lib/modules/*/dtb/*|usr/lib/modules/*/extramodules/*)\n'
             '   version="${target#usr/lib/modules/}"\n'
             '   version="${version%%/*}"\n'
-            '   if [[ -f "/usr/lib/modules/$version/vmlinuz" ]]; then versions["$version"]=1; fi ;;\n'
+            '   if [[ "$version" == *-piano-* && -f "/usr/lib/modules/$version/vmlinuz" ]]; then versions["$version"]=1; fi ;;\n'
             '  *) rebuild=1 ;;\n'
             ' esac\n'
             'done\n'
             'if (( rebuild )); then\n'
             ' for image in /usr/lib/modules/*/vmlinuz; do\n'
-            '  version="${image#/usr/lib/modules/}"; version="${version%/vmlinuz}"; versions["$version"]=1\n'
+            '  version="${image#/usr/lib/modules/}"; version="${version%/vmlinuz}"\n'
+            '  if [[ "$version" == *-piano-* ]]; then versions["$version"]=1; fi\n'
             ' done\n'
             'fi\n'
             'if [[ "${SUNUEFI_OFFLINE_ROOTFS:-0}" == 1 ]]; then\n'
@@ -181,9 +192,16 @@ def add_packages(plan, output, manifest, digest, *, image_modules=()):
             ' exit 0\n'
             'fi\n'
             '(( ${#versions[@]} )) || exit 0\n'
-            'if ! boot_root=$(bootctl --print-boot-path) || ! mountpoint -q "$boot_root"; then\n'
-            ' echo "Mount the EFI boot partition before updating or removing a kernel." >&2\n'
+            'if ! boot_root=$(bootctl --print-boot-path) || [[ "$boot_root" != /boot/efi ]] ||\n'
+            '   [[ "$(findmnt --mountpoint "$boot_root" -nro LABEL,FSTYPE)" != "SUNUEFI_ESP vfat" ]]; then\n'
+            ' echo "Mount the SunUEFI EFI boot partition at /boot/efi before changing a Piano kernel." >&2\n'
             ' exit 1\n'
+            'fi\n'
+            'if [[ "$action" == remove ]]; then\n'
+            ' running=$(uname -r)\n'
+            ' if [[ -v versions[$running] ]]; then\n'
+            '  echo "Reboot into another kernel before removing $running." >&2; exit 1\n'
+            ' fi\n'
             'fi\n'
             'for version in "${!versions[@]}"; do\n'
             ' if [[ "$action" == add ]]; then\n'
@@ -307,8 +325,10 @@ def add_packages(plan, output, manifest, digest, *, image_modules=()):
                 recipe = work / ('recipe-' + package_name)
                 recipe.mkdir()
                 shutil.copy2(archive_source, recipe / 'payload.tar')
+                pkgrel = '2' if package_name == 'piano-boot-config' else '1'
                 (recipe / 'PKGBUILD').write_text(
-                    f'pkgname={package_name}\npkgver={version}\npkgrel=1\narch=(any)\n'
+                    f'pkgname={package_name}\npkgver={version}\npkgrel={pkgrel}\narch=(any)\n'
+                    'options=(!debug !strip)\n'
                     f'pkgdesc="{description}"\nlicense=(GPL-2.0-only)\n'
                     f'depends=({depends})\nsource=(payload.tar)\n'
                     + ('backup=(' + ' '.join(path.relative_to(payload).as_posix()
@@ -324,7 +344,7 @@ def add_packages(plan, output, manifest, digest, *, image_modules=()):
                     subprocess.run(['chown', '-R', 'sunuefi-build:sunuefi-build', work], check=True)
                     command = ['runuser', '-u', 'sunuefi-build', '--', *command]
                 subprocess.run(command, cwd=recipe, env=env, check=True)
-                archive = output / f'{package_name}-{version}-1-any.pkg.tar.zst'
+                archive = output / f'{package_name}-{version}-{pkgrel}-any.pkg.tar.zst'
                 if not archive.is_file():
                     raise ValueError('makepkg did not produce the expected package: ' + archive.name)
             result.append(archive)

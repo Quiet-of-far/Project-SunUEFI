@@ -141,10 +141,31 @@ python3 tools/package_sparse_images.py --bundle artifacts/release --output artif
 `package` 默认读取 `build/distros/arch-niri-piano` 下的 rootfs、清单和 initramfs。
 `./build.sh all` 顺序构建固定源码、UEFI、模块、内核、Arch+niri 和安装镜像。
 
-已有根系统时，`./build.sh esp` 只生成启动镜像。启动镜像包含
-`/EFI/Linux/sunuefi.efi`，将内核、initramfs、DTB 和参数封装为 UKI，
-由 SunUEFI 直接启动。打包使用 systemd 的 `ukify`，默认从 Arch 的
-`systemd` 包取 ARM64 stub；也可用 `--stub` 和 `--ukify` 指定输入。
+已有根系统时，`./build.sh esp` 只生成启动镜像。默认由 systemd-boot 加载
+`/EFI/Linux/linux-<内核版本>.efi`，其中包含内核、initramfs、设备树和启动参数。
+
+### 为现有 Arch 构建可回退的内核包
+
+在 ARM64 构建环境中，先完成 `./build.sh linux`，再用同一份构建输出生成 pacman 包：
+
+```sh
+./build.sh linux-package --output artifacts/packages/kernel/pacman
+```
+
+该目录包含版本化内核、设备树、相机回环模块、headers、启动配置和元包。
+在平板上先用 `findmnt --mountpoint /boot/efi -o TARGET,LABEL,FSTYPE` 确认
+`SUNUEFI_ESP` 已挂载，并备份当前 ESP。将同一目录中的包作为一组安装，在该目录运行
+`sudo pacman -U ./*.pkg.tar.zst`。已有手动部署的同版本模块可能与软件包发生文件冲突，
+首次迁移请使用一个新的内核版本。包管理器仍按本机的签名策略验证包。
+
+默认由 `mkinitcpio` 和 `kernel-install` 生成 BLS 条目，现有 UKI 可以继续从
+systemd-boot 选择。确认 `bootctl list` 出现新版本再重启。新条目成功写入后，保留
+最新版和一个回退版本，优先保留当前运行的版本。旧版本的软件包可在验证新内核后用
+pacman 清理。
+
+Arch+niri 默认用 `xdg-terminal-exec` 选择 Foot，Thunar 的目录终端动作也走这个入口。
+现有用户的自定义 Thunar 动作仍由自己的配置决定。要试用内屏自动旋转，可在 niri 配置
+中添加 `spawn-at-startup "piano-niri-rotate"`，重新登录后由 SensorProxy 提供方向。
 
 设备固件由 `tools/stage_piano_firmware.py` 安装。`config/release.json` 的
 `firmware.overlays` 选择 HyperOS DSP 等固件，来源、大小和 SHA256 记录在清单中。

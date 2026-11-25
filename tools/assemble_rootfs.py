@@ -189,12 +189,42 @@ def clean_identity(root, guest):
                      '\n登录、解锁和 sudo 使用此密码，可在系统设置中修改。\n')
 
 
+def configure_niri_terminal(root, skeleton):
+    terminals = inside(root, root / 'etc/xdg/xdg-terminals.list')
+    terminals.parent.mkdir(parents=True, exist_ok=True)
+    terminals.write_text('foot.desktop\n')
+    helper = inside(root, root / 'usr/local/share/xfce4/helpers/piano-terminal.desktop')
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_text(
+        '[Desktop Entry]\nType=X-XFCE-Helper\nName=Default Terminal\n'
+        'X-XFCE-Category=TerminalEmulator\nX-XFCE-Commands=xdg-terminal-exec;\n'
+        'X-XFCE-CommandsWithParameter=xdg-terminal-exec %s;\n')
+    preferred = inside(root, root / 'etc/xdg/xfce4/helpers.rc')
+    preferred.parent.mkdir(parents=True, exist_ok=True)
+    # Keep other preferred applications from the base image.
+    lines = preferred.read_text().splitlines() if preferred.is_file() else []
+    lines = [line for line in lines if not line.startswith('TerminalEmulator=')]
+    preferred.write_text('\n'.join([*lines, 'TerminalEmulator=piano-terminal']) + '\n')
+
+    stock = guest_resolve(root, '/etc/xdg/Thunar/uca.xml')
+    if stock.is_file():
+        original = stock.read_text()
+        settings = re.sub(
+            r'(?:exo-open|xfce-open) --working-directory (%[fd]) --launch TerminalEmulator',
+            r'xdg-terminal-exec --dir=\1', original)
+        if settings != original:
+            target = inside(root, skeleton / '.config/Thunar/uca.xml')
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(settings)
+
+
 def configure_desktop(root, result, guest, optional):
     desktop, scale = result['desktop'], result['scale_percent']
     skeleton = inside(root, root / 'etc/skel')
     if skeleton.is_symlink(): raise ValueError('Guest skeleton redirects a host write')
     skeleton.mkdir(parents=True, exist_ok=True)
     if desktop == 'niri':
+        configure_niri_terminal(root, skeleton)
         config = skeleton / '.config/niri/config.kdl'; config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(
             '// Piano Arch Linux ARM starter session; outputs use automatic settings.\n'
